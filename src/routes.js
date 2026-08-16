@@ -57,6 +57,36 @@ router.post('/api/leads', async (req, res) => {
   res.json({ success: true, lead, queued: true });
 });
 
+// ─── BROWSER-FRIENDLY TEST CALL ───
+router.get('/test-call/:phone', async (req, res) => {
+  try {
+    const phone = formatPhoneE164(req.params.phone);
+    if (!phone) return res.status(400).json({ error: 'Invalid phone number' });
+    
+    const lead = await prisma.lead.create({
+      data: {
+        name: 'Dave Test',
+        phone,
+        email: 'askdave755@gmail.com',
+        company: 'Test Trucking Co',
+        state: 'MI',
+        source: 'manual_test',
+        status: 'pending'
+      }
+    });
+    
+    await callQueue.add('make-call', { leadId: lead.id }, { delay: 3000 });
+    
+    res.json({
+      message: `Test call queued for ${phone} (3s delay)`,
+      leadId: lead.id
+    });
+  } catch (error) {
+    console.error('Test call error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── GET LEADS ───
 router.get('/api/leads', async (req, res) => {
   const { status, state, limit = 50 } = req.query;
@@ -127,11 +157,25 @@ router.get('/admin/resume', (req, res) => {
 });
 
 router.get('/admin/status', async (req, res) => {
-  const counts = await callQueue.getJobCounts();
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  // Never hang: if Redis/Bull is unresponsive, fall back after 5s.
+  let counts;
+  try {
+    counts = await Promise.race([
+      callQueue.getJobCounts(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('getJobCounts timeout')), 5000))
+    ]);
+  } catch (err) {
+    counts = { error: err.message, unavailable: true };
+  }
   
-  const stats = await prisma.dailyStat.findUnique({ where: { date: today } });
+  let stats = null;
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    stats = await prisma.dailyStat.findUnique({ where: { date: today } });
+  } catch (err) {
+    console.error('dailyStat lookup failed:', err.message);
+  }
   
   res.json({
     queue: counts,

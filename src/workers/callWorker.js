@@ -75,6 +75,8 @@ callQueue.process('make-call', 3, async (job) => {
   return { callId: result.callId, cost: result.cost };
 });
 
+console.log('👷 Call worker registered on queue: vapi-calls (job: make-call, concurrency: 3)');
+
 // ─── WEBHOOK HANDLER (called from routes) ───
 async function handleVapiWebhook(webhookData) {
   const { call, analysis } = webhookData.message || {};

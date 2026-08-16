@@ -1,13 +1,23 @@
 const axios = require('axios');
-const sgMail = require('@sendgrid/mail');
 const config = require('../config');
 const prisma = require('../db');
 
-if (config.SENDGRID_API_KEY) {
-  sgMail.setApiKey(config.SENDGRID_API_KEY);
+// Optional providers — must not crash the require chain if the package
+// is missing (e.g. during the SendGrid → Brevo migration).
+let sgMail = null;
+try {
+  sgMail = require('@sendgrid/mail');
+  if (config.SENDGRID_API_KEY) {
+    sgMail.setApiKey(config.SENDGRID_API_KEY);
+  }
+} catch (err) {
+  console.warn('⚠️ @sendgrid/mail not available — SendGrid email disabled:', err.message);
 }
 
 async function sendSMS(phone, message, leadId) {
+  if (!config.TEXTMAGIC_USERNAME || !config.TEXTMAGIC_API_KEY) {
+    return { success: false, error: 'TextMagic not configured' };
+  }
   try {
     const response = await axios.post(
       'https://rest.textmagic.com/api/v2/messages',
@@ -34,8 +44,30 @@ async function sendSMS(phone, message, leadId) {
   }
 }
 
+async function sendEmailBrevo(lead, subject, html, text) {
+  const response = await axios.post(
+    'https://api.brevo.com/v3/smtp/email',
+    {
+      sender: { email: config.EMAIL_FROM, name: 'Brady - Smart Choice' },
+      to: [{ email: lead.email, name: lead.name }],
+      subject,
+      htmlContent: html,
+      textContent: text
+    },
+    {
+      headers: { 'api-key': process.env.BREVO_API_KEY },
+      timeout: 10000
+    }
+  );
+  return response.data;
+}
+
 async function sendQualificationEmail(lead) {
-  if (!lead.email || !config.SENDGRID_API_KEY) return { success: false };
+  if (!lead.email) return { success: false, error: 'No email' };
+  const useBrevo = !!process.env.BREVO_API_KEY;
+  if (!useBrevo && (!sgMail || !config.SENDGRID_API_KEY)) {
+    return { success: false, error: 'No email provider configured' };
+  }
   
   const stateCfg = config.STATE_CONFIG[lead.state];
   
@@ -76,17 +108,18 @@ async function sendQualificationEmail(lead) {
     </div>
   `;
   
+  const subject = `${lead.company || 'Your Business'} - Insurance Comparison Ready`;
+  const text = `Hi ${lead.name.split(' ')[0]},\n\nBrady here from Smart Choice. Ready to run your numbers against ${stateCfg?.carriers}.\n\nBook 15 minutes: ${config.CALENDLY_LINK}\n\n-Brady`;
+  
   try {
-    await sgMail.send({
-      to: lead.email,
-      from: config.EMAIL_FROM,
-      subject: `${lead.company || 'Your Business'} - Insurance Comparison Ready`,
-      html,
-      text: `Hi ${lead.name.split(' ')[0]},\n\nBrady here from Smart Choice. Ready to run your numbers against ${stateCfg?.carriers}.\n\nBook 15 minutes: ${config.CALENDLY_LINK}\n\n-Brady`
-    });
+    if (useBrevo) {
+      await sendEmailBrevo(lead, subject, html, text);
+    } else {
+      await sgMail.send({ to: lead.email, from: config.EMAIL_FROM, subject, html, text });
+    }
     
     await prisma.cost.create({
-      data: { leadId: lead.id, type: 'email', amount: 0.0001, description: 'SendGrid email' }
+      data: { leadId: lead.id, type: 'email', amount: 0.0001, description: useBrevo ? 'Brevo email' : 'SendGrid email' }
     });
     
     return { success: true };
