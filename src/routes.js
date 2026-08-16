@@ -63,6 +63,8 @@ router.get('/test-call/:phone', async (req, res) => {
     const phone = formatPhoneE164(req.params.phone);
     if (!phone) return res.status(400).json({ error: 'Invalid phone number' });
     
+    const force = req.query.force === 'true';
+    
     const lead = await prisma.lead.create({
       data: {
         name: 'Dave Test',
@@ -75,11 +77,12 @@ router.get('/test-call/:phone', async (req, res) => {
       }
     });
     
-    await callQueue.add('make-call', { leadId: lead.id }, { delay: 3000 });
+    await callQueue.add('make-call', { leadId: lead.id, force: true }, { delay: 3000 });
     
     res.json({
-      message: `Test call queued for ${phone} (3s delay)`,
-      leadId: lead.id
+      message: `Test call queued for ${phone} (3s delay)${force ? ' [FORCE MODE]' : ''}`,
+      leadId: lead.id,
+      force
     });
   } catch (error) {
     console.error('Test call error:', error);
