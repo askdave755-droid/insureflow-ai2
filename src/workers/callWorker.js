@@ -5,13 +5,15 @@ const { isBusinessHours, isQualified } = require('../lib/validate');
 const { handleQualifiedLead } = require('../lib/messaging');
 
 callQueue.process('make-call', 3, async (job) => {
-  const { leadId } = job.data;
+  const { leadId, force } = job.data;
   
   const lead = await prisma.lead.findUnique({ where: { id: leadId } });
   if (!lead) throw new Error('Lead not found');
   
-  // Double-check business hours
-  if (!isBusinessHours(lead.state)) {
+  // Double-check business hours (skipped in force mode)
+  if (force) {
+    console.log('⚡ Force mode: skipping business hours check');
+  } else if (!isBusinessHours(lead.state)) {
     console.log(`⏳ Rescheduling ${leadId} - outside business hours`);
     const { getNextBusinessTime } = require('../lib/validate');
     const nextTime = getNextBusinessTime(lead.state);
