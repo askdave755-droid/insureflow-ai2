@@ -50,6 +50,36 @@ const STATE_CONFIG = {
     wcAvailable: true,
     tone: 'friendly',
     timezone: 'America/Chicago'
+  },
+  TN: {
+    script: 'freight_logistics',
+    priority: true,
+    vertical: 'commercial_auto',
+    carriers: 'The Hartford and Progressive',
+    opener: 'Memphis is the freight capital — coverage gaps everywhere',
+    wcAvailable: true,
+    tone: 'friendly',
+    timezone: 'America/Chicago'
+  },
+  GA: {
+    script: 'port_trucking',
+    priority: true,
+    vertical: 'commercial_auto',
+    carriers: 'The Hartford and Progressive',
+    opener: 'Atlanta and Savannah port trucking is booming',
+    wcAvailable: true,
+    tone: 'friendly',
+    timezone: 'America/New_York'
+  },
+  IN: {
+    script: 'logistics_corridor',
+    priority: true,
+    vertical: 'commercial_auto',
+    carriers: 'The Hartford and Progressive',
+    opener: 'Indiana logistics corridor means fleet growth',
+    wcAvailable: true,
+    tone: 'friendly',
+    timezone: 'America/Indiana/Indianapolis'
   }
 };
 
