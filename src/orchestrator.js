@@ -5,15 +5,32 @@ const { fetchApolloContacts, fetchLeOFromSFTP } = require('./sources');
 const { isBusinessHours, getNextBusinessTime } = require('./lib/validate');
 const config = require('./config');
 
+const SOURCES = [
+  { state: 'MI', city: 'Detroit' },
+  { state: 'MI', city: 'Grand Rapids' },
+  { state: 'TX', city: 'Houston' },
+  { state: 'TX', city: 'Dallas' },
+  { state: 'OH', city: 'Columbus' },
+  { state: 'TN', city: 'Memphis' },
+  { state: 'GA', city: 'Atlanta' },
+  { state: 'IN', city: 'Indianapolis' },
+];
+
 async function ingestAndQueue() {
   console.log('🔄 Running lead ingestion...');
   
   const allLeads = [];
   
-  // Pull from all sources
+  // Pull from Apollo, rotating city by hour
   if (config.APOLLO_API_KEY) {
-    const apollo = await fetchApolloContacts('TX', 'Houston', 50);
-    allLeads.push(...apollo);
+    const source = SOURCES[new Date().getHours() % SOURCES.length];
+    console.log(`🌆 Apollo pull: ${source.city}, ${source.state}`);
+    try {
+      const apollo = await fetchApolloContacts(source.state, source.city, 50);
+      allLeads.push(...apollo);
+    } catch (error) {
+      console.warn(`⚠️ Apollo pull failed: ${error.message}`);
+    }
   }
   
   if (config.LEO_SFTP_HOST) {
