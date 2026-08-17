@@ -101,6 +101,7 @@ module.exports = {
   TEXTMAGIC_API_KEY: process.env.TEXTMAGIC_API_KEY,
   
   SENDGRID_API_KEY: process.env.SENDGRID_API_KEY,
+  BREVO_API_KEY: process.env.BREVO_API_KEY,
   EMAIL_FROM: process.env.EMAIL_FROM,
   CALENDLY_LINK: process.env.CALENDLY_LINK,
   
