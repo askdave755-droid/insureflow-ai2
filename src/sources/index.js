@@ -7,38 +7,112 @@ const config = require('../config');
 const { formatPhoneE164 } = require('../lib/validate');
 
 // ─── APOLLO.IO API ───
+// Current spec (2025-2026):
+//   Search:   POST https://api.apollo.io/api/v1/mixed_people/api_search
+//             Auth via 'X-Api-Key' header. Filters: person_titles[], person_locations[],
+//             q_keywords, per_page, page. NOTE: search does NOT return emails/phones.
+//   Enrich:   POST https://api.apollo.io/api/v1/people/bulk_match (up to 10 per call)
+//             Returns emails/phones; reveal_phone_number requires a webhook_url and a
+//             paid plan, so we only use synchronously returned data and handle
+//             402/403 (plan limits) gracefully.
+const APOLLO_HEADERS = () => ({
+  'Content-Type': 'application/json',
+  'Cache-Control': 'no-cache',
+  'X-Api-Key': config.APOLLO_API_KEY
+});
+
+function logApolloError(context, err) {
+  const status = err.response?.status;
+  const data = err.response?.data;
+  if (status === 402 || status === 403) {
+    console.warn(`Apollo plan limit (${context}):`, status, JSON.stringify(data || err.message));
+  } else {
+    console.error(`Apollo ${context} failed:`, status, JSON.stringify(data || err.message));
+  }
+}
+
+async function enrichApolloPeople(people) {
+  // Bulk-enrich in batches of 10 to retrieve emails/phones. Skip on plan limits.
+  const enriched = new Map();
+  for (let i = 0; i < people.length; i += 10) {
+    const batch = people.slice(i, i + 10);
+    try {
+      const res = await axios.post(
+        'https://api.apollo.io/api/v1/people/bulk_match',
+        {
+          details: batch.map(p => ({
+            id: p.id,
+            first_name: p.first_name,
+            last_name: p.last_name,
+            organization_name: p.organization?.name
+          }))
+        },
+        { headers: APOLLO_HEADERS(), timeout: 20000 }
+      );
+      for (const match of (res.data.matches || [])) {
+        if (match && match.id) enriched.set(match.id, match);
+      }
+    } catch (err) {
+      logApolloError('enrichment', err);
+      if (err.response?.status === 402 || err.response?.status === 403) break; // plan limit — stop enriching
+    }
+  }
+  return enriched;
+}
+
 async function fetchApolloContacts(state, city, limit = 100) {
   if (!config.APOLLO_API_KEY) return [];
-  
+
   try {
     const response = await axios.post(
-      'https://api.apollo.io/v1/mixed_people/search',
+      'https://api.apollo.io/api/v1/mixed_people/api_search',
       {
-        api_key: config.APOLLO_API_KEY,
-        person_titles: ['Owner', 'President', 'CEO', 'Fleet Manager', 'General Manager'],
-        person_locations: [`${city}, ${state}, United States`],
-        organization_industries: ['Trucking', 'Transportation', 'Logistics', 'Freight'],
-        contact_email_status: ['verified'],
-        phone_numbers: ['has_mobile_phone'],
-        per_page: limit
+        person_titles: ['Owner', 'President', 'CEO', 'Fleet Manager', 'Operations Manager'],
+        person_locations: [`${city}, ${state}, US`],
+        q_keywords: 'trucking logistics freight transportation',
+        per_page: Math.min(limit, 100),
+        page: 1
       },
-      { timeout: 15000 }
+      { headers: APOLLO_HEADERS(), timeout: 15000 }
     );
-    
-    return (response.data.people || []).map(p => ({
-      name: `${p.first_name || ''} ${p.last_name || ''}`.trim(),
-      phone: formatPhoneE164(p.phone_numbers?.[0]?.raw_number || p.mobile_phone),
-      email: p.email,
-      company: p.organization?.name,
-      title: p.title,
-      state,
-      city,
-      source: 'apollo',
-      insuranceType: 'commercial_auto',
-      industry: p.organization?.industry
-    })).filter(l => l.phone && l.name);
+
+    const people = response.data.people || [];
+    if (!people.length) {
+      console.log(`Apollo search: 0 results for ${city}, ${state}`);
+      return [];
+    }
+
+    // Search results don't include phones/emails — enrich to get them.
+    const enriched = await enrichApolloPeople(people);
+
+    const leads = people.map(p => {
+      const e = enriched.get(p.id) || {};
+      const phone = formatPhoneE164(
+        e.phone_numbers?.[0]?.sanitized_number ||
+        e.phone_numbers?.[0]?.raw_number ||
+        e.organization?.primary_phone?.sanitized_number ||
+        e.organization?.phone ||
+        p.organization?.primary_phone?.sanitized_number ||
+        p.organization?.phone
+      );
+      return {
+        name: `${p.first_name || ''} ${p.last_name || e.last_name || ''}`.trim(),
+        phone,
+        email: e.email || p.email,
+        company: p.organization?.name || e.organization?.name,
+        title: p.title || e.title,
+        state,
+        city,
+        source: 'apollo',
+        insuranceType: 'commercial_auto',
+        industry: p.organization?.industry || e.organization?.industry
+      };
+    }).filter(l => l.phone && l.name);
+
+    console.log(`Apollo search: ${people.length} found, ${leads.length} with phone for ${city}, ${state}`);
+    return leads;
   } catch (error) {
-    console.error('Apollo fetch failed:', error.message);
+    console.error('Apollo fetch failed:', error.response?.status, JSON.stringify(error.response?.data || error.message));
     return [];
   }
 }
