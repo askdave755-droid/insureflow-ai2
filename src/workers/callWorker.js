@@ -81,51 +81,109 @@ console.log('👷 Call worker registered on queue: vapi-calls (job: make-call, c
 
 // ─── WEBHOOK HANDLER (called from routes) ───
 async function handleVapiWebhook(webhookData) {
-  const { call, analysis } = webhookData.message || {};
-  if (!call?.id) throw new Error('Missing call ID');
-  
+  const message = webhookData.message || {};
+  console.log('📬 Vapi webhook:', message?.type, message?.call?.id);
+
+  // Only process the final end-of-call report; ignore status-update,
+  // transcript updates, speech events, etc.
+  if (message.type !== 'end-of-call-report') {
+    return { ignored: message.type };
+  }
+
+  const callId = message.call?.id;
+  if (!callId) throw new Error('Missing call ID');
+
+  // Extract with fallbacks for the various Vapi payload shapes
+  const transcript = message.artifact?.transcript || message.transcript || '';
+  const summary = message.analysis?.summary || message.summary || '';
+  const recordingUrl = message.artifact?.recordingUrl || '';
+  let duration = null;
+  if (message.artifact?.durationMs) {
+    duration = Math.round(message.artifact.durationMs / 1000);
+  } else if (message.call?.startedAt && message.call?.endedAt) {
+    duration = Math.round((new Date(message.call.endedAt) - new Date(message.call.startedAt)) / 1000);
+  }
+  const successEvaluation = message.analysis?.successEvaluation;
+
   const callLog = await prisma.callLog.findFirst({
-    where: { callId: call.id },
+    where: { callId },
     include: { lead: true }
   });
-  
+
   if (!callLog) {
-    console.error('Call log not found for:', call.id);
-    return;
+    console.error('❌ Call log not found for Vapi call ID:', callId);
+    // Fallback: maybe the lead has this vapiCallId but no callLog row
+    const lead = await prisma.lead.findFirst({ where: { vapiCallId: callId } });
+    if (lead) {
+      console.log(`⚠️ Found lead ${lead.id} by vapiCallId but no CallLog row — creating one`);
+      const qualified = isQualified(transcript) ||
+                        (successEvaluation && String(successEvaluation).toLowerCase().includes('success')) ||
+                        false;
+      const newLog = await prisma.callLog.create({
+        data: {
+          leadId: lead.id,
+          callId,
+          status: message.call?.status || 'ended',
+          duration,
+          transcript,
+          summary,
+          qualified,
+          recordingUrl
+        }
+      });
+      await prisma.lead.update({
+        where: { id: lead.id },
+        data: {
+          status: qualified ? 'qualified' : 'not_interested',
+          qualified,
+          transcript,
+          qualifiedAt: qualified ? new Date() : null
+        }
+      });
+      if (qualified) {
+        console.log(`🔥 QUALIFIED: ${lead.name} (${lead.company})`);
+        await handleQualifiedLead(lead);
+      }
+      return { qualified, leadId: lead.id, callLogCreated: newLog.id };
+    }
+    console.error('❌ No lead found with vapiCallId either:', callId);
+    return { error: 'callLog not found', callId };
   }
-  
-  const qualified = isQualified(call.transcript) || 
-                    analysis?.successEvaluation?.toLowerCase()?.includes('success');
-  
+
+  const qualified = isQualified(transcript) ||
+                    (successEvaluation && String(successEvaluation).toLowerCase().includes('success')) ||
+                    false;
+
   // Update call log
   await prisma.callLog.update({
     where: { id: callLog.id },
     data: {
-      status: call.status,
-      duration: call.duration,
-      transcript: call.transcript,
-      summary: analysis?.summary,
-      qualified
+      status: message.call?.status || 'ended',
+      duration,
+      transcript,
+      summary,
+      qualified,
+      recordingUrl
     }
   });
-  
+
   // Update lead
   await prisma.lead.update({
     where: { id: callLog.leadId },
     data: {
       status: qualified ? 'qualified' : 'not_interested',
       qualified,
-      transcript: call.transcript,
+      transcript,
       qualifiedAt: qualified ? new Date() : null
     }
   });
-  
+
   // If qualified, trigger followups
   if (qualified) {
     console.log(`🔥 QUALIFIED: ${callLog.lead.name} (${callLog.lead.company})`);
     await handleQualifiedLead(callLog.lead);
   }
-  
+
   return { qualified, leadId: callLog.leadId };
 }
 
