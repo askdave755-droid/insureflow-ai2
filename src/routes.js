@@ -4,6 +4,7 @@ const prisma = require('./db');
 const { callQueue } = require('./queue');
 const { formatPhoneE164, isBusinessHours, getNextBusinessTime } = require('./lib/validate');
 const { handleVapiWebhook } = require('./workers/callWorker');
+const { sendEmailBrevo } = require('./lib/messaging');
 const config = require('./config');
 
 const router = express.Router();
@@ -16,6 +17,51 @@ router.get('/health', async (req, res) => {
     timestamp: new Date().toISOString(),
     version: '2.0.0'
   });
+});
+
+// ─── TEST EMAIL (Brevo smoke test — browser friendly) ───
+router.get('/test-email', async (req, res) => {
+  try {
+    if (!config.BREVO_API_KEY) {
+      return res.status(500).json({ sent: false, error: 'BREVO_API_KEY is not set in config/env' });
+    }
+
+    const testLead = {
+      email: 'askdave755@gmail.com',
+      name: 'Dave Test',
+      company: 'Test Trucking Co',
+      state: 'MI'
+    };
+
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1a1a1a;">
+        <div style="background: linear-gradient(135deg, #1e3a5f 0%, #2d5a87 100%); padding: 30px; text-align: center;">
+          <h1 style="color: #fff; margin: 0; font-size: 24px;">Smart Choice Agents</h1>
+          <p style="color: #e0e0e0; margin: 10px 0 0;">Brevo Integration Test</p>
+        </div>
+        <div style="padding: 30px; background: #fff;">
+          <p>This is a test email from InsureFlowAI 2.0 to verify the Brevo email path is working.</p>
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${config.CALENDLY_LINK}"
+               style="background: #2d5a87; color: #fff; padding: 15px 40px; text-decoration: none; border-radius: 5px; font-size: 16px; display: inline-block;">
+              Book My Comparison Call
+            </a>
+          </div>
+          <p style="color: #666; font-size: 14px;">If you received this, Brevo is correctly wired. 🎉</p>
+        </div>
+      </div>
+    `;
+    const text = `InsureFlowAI 2.0 Brevo test email. Book here: ${config.CALENDLY_LINK}`;
+
+    const data = await sendEmailBrevo(testLead, 'InsureFlow Test Email', html, text);
+    res.json({ sent: true, messageId: data?.messageId || null });
+  } catch (error) {
+    console.error('❌ /test-email failed:', error.response?.data || error.message);
+    res.status(500).json({
+      sent: false,
+      error: error.response?.data || error.message
+    });
+  }
 });
 
 // ─── ADD SINGLE LEAD ───
