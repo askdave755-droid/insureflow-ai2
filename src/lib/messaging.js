@@ -45,27 +45,47 @@ async function sendSMS(phone, message, leadId) {
 }
 
 async function sendEmailBrevo(lead, subject, html, text) {
-  const response = await axios.post(
-    'https://api.brevo.com/v3/smtp/email',
-    {
-      sender: { email: config.EMAIL_FROM, name: 'Brady - Smart Choice' },
-      to: [{ email: lead.email, name: lead.name }],
-      subject,
-      htmlContent: html,
-      textContent: text
-    },
-    {
-      headers: { 'api-key': process.env.BREVO_API_KEY },
-      timeout: 10000
-    }
-  );
-  return response.data;
+  const apiKey = config.BREVO_API_KEY;
+  if (!apiKey) {
+    const msg = '❌ BREVO_API_KEY is not set — cannot send email via Brevo';
+    console.error(msg);
+    throw new Error('BREVO_API_KEY not configured');
+  }
+
+  console.log(`📧 Sending qualification email via Brevo to ${lead.email}...`);
+  try {
+    const response = await axios.post(
+      'https://api.brevo.com/v3/smtp/email',
+      {
+        sender: { email: config.EMAIL_FROM, name: 'Brady - Smart Choice' },
+        to: [{ email: lead.email, name: lead.name }],
+        subject,
+        htmlContent: html,
+        textContent: text
+      },
+      {
+        headers: { 'api-key': apiKey },
+        timeout: 10000
+      }
+    );
+    console.log(`✅ Brevo email sent to ${lead.email} — messageId: ${response.data?.messageId}`);
+    return response.data;
+  } catch (err) {
+    console.error(`❌ Brevo email to ${lead.email} FAILED:`);
+    console.error('   HTTP status:', err.response?.status);
+    console.error('   Response body:', JSON.stringify(err.response?.data || err.message));
+    throw err;
+  }
 }
 
 async function sendQualificationEmail(lead) {
-  if (!lead.email) return { success: false, error: 'No email' };
-  const useBrevo = !!process.env.BREVO_API_KEY;
+  if (!lead.email) {
+    console.warn(`⚠️ Qualified lead ${lead.id} (${lead.name}) has no email — skipping email`);
+    return { success: false, error: 'No email' };
+  }
+  const useBrevo = !!config.BREVO_API_KEY;
   if (!useBrevo && (!sgMail || !config.SENDGRID_API_KEY)) {
+    console.error('❌ No email provider configured (no BREVO_API_KEY, no SendGrid)');
     return { success: false, error: 'No email provider configured' };
   }
   
@@ -112,8 +132,9 @@ async function sendQualificationEmail(lead) {
   const text = `Hi ${lead.name.split(' ')[0]},\n\nBrady here from Smart Choice. Ready to run your numbers against ${stateCfg?.carriers}.\n\nBook 15 minutes: ${config.CALENDLY_LINK}\n\n-Brady`;
   
   try {
+    let brevoData = null;
     if (useBrevo) {
-      await sendEmailBrevo(lead, subject, html, text);
+      brevoData = await sendEmailBrevo(lead, subject, html, text);
     } else {
       await sgMail.send({ to: lead.email, from: config.EMAIL_FROM, subject, html, text });
     }
@@ -122,10 +143,10 @@ async function sendQualificationEmail(lead) {
       data: { leadId: lead.id, type: 'email', amount: 0.0001, description: useBrevo ? 'Brevo email' : 'SendGrid email' }
     });
     
-    return { success: true };
+    return { success: true, messageId: brevoData?.messageId };
   } catch (error) {
-    console.error('Email failed:', error.message);
-    return { success: false, error: error.message };
+    console.error('Email failed:', error.response?.data || error.message);
+    return { success: false, error: error.response?.data || error.message };
   }
 }
 
@@ -143,9 +164,11 @@ async function handleQualifiedLead(lead) {
       const email = await sendQualificationEmail(lead);
       results.push({ channel: 'email', ...email });
     }, 120000);
+  } else {
+    console.warn(`⚠️ Qualified lead has no email — skipping email (lead ${lead.id}, ${lead.name})`);
   }
   
   return results;
 }
 
-module.exports = { sendSMS, sendQualificationEmail, handleQualifiedLead };
+module.exports = { sendSMS, sendEmailBrevo, sendQualificationEmail, handleQualifiedLead };
