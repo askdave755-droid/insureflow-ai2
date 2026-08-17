@@ -113,6 +113,7 @@ module.exports = {
   LEO_SFTP_PASS: process.env.LEO_SFTP_PASS,
   
   PHANTOM_WEBHOOK_SECRET: process.env.PHANTOM_WEBHOOK_SECRET,
+  PHANTOM_API_KEY: process.env.PHANTOM_API_KEY,
   
   STATE_CONFIG,
   ALLOWED_STATES,
