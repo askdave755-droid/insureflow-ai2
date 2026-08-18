@@ -449,4 +449,63 @@ router.post('/admin/nuclear-reset', async (req, res) => {
   res.json({ reset: true, message: 'All data cleared' });
 });
 
+// ─── TARGETED CLEANUP ───
+// Deletes ONLY junk: test leads (manual_test + webhook self-tests) and
+// national-carrier/chain leads. Real scraped leads are kept. Requires
+// x-admin-key header like nuclear-reset.
+router.post('/admin/cleanup', async (req, res) => {
+  if (req.headers['x-admin-key'] !== config.ADMIN_API_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    // 1) Test leads by source
+    const byTestSource = await prisma.lead.deleteMany({
+      where: { source: { in: ['manual_test'] } }
+    });
+
+    // 2) Webhook/self-test dummies by name
+    const byTestName = await prisma.lead.deleteMany({
+      where: {
+        OR: [
+          { name: { contains: 'Self Test', mode: 'insensitive' } },
+          { name: { contains: 'String Parse Test', mode: 'insensitive' } },
+          { name: { contains: 'Mike Trucker', mode: 'insensitive' } },
+          { name: { contains: 'Dave Test', mode: 'insensitive' } },
+          { company: { contains: 'Test Trucking Co', mode: 'insensitive' } }
+        ]
+      }
+    });
+
+    // 3) National carriers / chains that slipped in before the skip filter
+    let nationalDeleted = 0;
+    const nationals = await prisma.lead.findMany({
+      select: { id: true, name: true, company: true }
+    });
+    const junkIds = nationals
+      .filter(l => isSkippableBusiness(l.company) || isSkippableBusiness(l.name))
+      .map(l => l.id);
+    if (junkIds.length) {
+      const r = await prisma.lead.deleteMany({ where: { id: { in: junkIds } } });
+      nationalDeleted = r.count;
+    }
+
+    const remaining = await prisma.lead.count();
+    console.log(`🧹 Cleanup: ${byTestSource.count} test-source, ${byTestName.count} test-name, ${nationalDeleted} national — ${remaining} leads remain`);
+
+    res.json({
+      cleaned: true,
+      deleted: {
+        testSource: byTestSource.count,
+        testName: byTestName.count,
+        nationalCarriers: nationalDeleted
+      },
+      remaining
+    });
+  } catch (error) {
+    console.error('❌ Cleanup failed:', error);
+    res.status(500).json({ cleaned: false, error: error.message });
+  }
+});
+
 module.exports = router;
