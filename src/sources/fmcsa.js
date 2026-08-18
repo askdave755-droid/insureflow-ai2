@@ -10,6 +10,18 @@ const FMCSA_BASE = 'https://mobile.fmcsa.dot.gov/qc/services/carriers';
 
 let warnedNoKey = false;
 
+// Common city/location words that Google Maps appends to business titles but
+// that are NOT part of the FMCSA legal name (e.g. "ContainerPort Group Detroit").
+const US_STATE_WORDS = new Set([
+  'ALABAMA','ALASKA','ARIZONA','ARKANSAS','CALIFORNIA','COLORADO','CONNECTICUT',
+  'DELAWARE','FLORIDA','GEORGIA','HAWAII','IDAHO','ILLINOIS','INDIANA','IOWA',
+  'KANSAS','KENTUCKY','LOUISIANA','MAINE','MARYLAND','MASSACHUSETTS','MICHIGAN',
+  'MINNESOTA','MISSISSIPPI','MISSOURI','MONTANA','NEBRASKA','NEVADA','HAMPSHIRE',
+  'JERSEY','MEXICO','YORK','CAROLINA','DAKOTA','OHIO','OKLAHOMA','OREGON',
+  'PENNSYLVANIA','RHODE','TENNESSEE','TEXAS','UTAH','VERMONT','VIRGINIA',
+  'WASHINGTON','WISCONSIN','WYOMING'
+]);
+
 function normalizeName(s) {
   return String(s || '')
     .toUpperCase()
@@ -17,6 +29,36 @@ function normalizeName(s) {
     .replace(/[^A-Z0-9 ]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+// Build lookup candidates: the raw name, then progressively shortened versions
+// with trailing words dropped (Google Maps titles often end with the city:
+// "ContainerPort Group Detroit" -> "ContainerPort Group"). Min 2 words kept.
+function buildNameVariants(raw) {
+  const variants = [];
+  const seen = new Set();
+  const push = (v) => {
+    const t = String(v || '').trim();
+    if (t.length >= 3 && !seen.has(t.toUpperCase())) {
+      seen.add(t.toUpperCase());
+      variants.push(t);
+    }
+  };
+
+  push(raw);
+
+  const words = String(raw || '').trim().split(/\s+/);
+  // Drop trailing words one at a time (keep at least 2 words)
+  for (let len = words.length - 1; len >= 2; len--) {
+    push(words.slice(0, len).join(' '));
+  }
+  // Also try dropping trailing state/city words explicitly
+  while (words.length > 2 && US_STATE_WORDS.has(words[words.length - 1].toUpperCase())) {
+    words.pop();
+    push(words.join(' '));
+  }
+
+  return variants.slice(0, 5); // cap lookups per name
 }
 
 function toInt(v) {
@@ -123,31 +165,46 @@ async function enrichWithFMCSA({ name, company, state, phone }) {
     return null;
   }
 
-  const candidates = [company, name].filter(Boolean);
+  // Build the full candidate list: company + name, each with shortened variants
+  // to handle Google Maps titles that include the city ("X Trucking Detroit").
+  const baseNames = [company, name].filter(Boolean);
+  const candidates = [];
+  const seen = new Set();
+  for (const base of baseNames) {
+    for (const variant of buildNameVariants(base)) {
+      if (!seen.has(variant.toUpperCase())) {
+        seen.add(variant.toUpperCase());
+        candidates.push(variant);
+      }
+    }
+  }
+
   if (!candidates.length) return null;
 
   for (const candidate of candidates) {
     try {
       const result = await lookupByName(candidate, state);
-      if (result) return result;
-      console.warn(`⚠️ FMCSA: no match for ${candidate}${state ? ` (${state})` : ''}`);
+      if (result) {
+        if (candidate !== baseNames[0]) {
+          console.log(`🛡️ FMCSA matched via shortened name: "${candidate}"`);
+        }
+        return result;
+      }
     } catch (err) {
       const status = err.response?.status;
-      if (status && status >= 400 && status < 500) {
-        // 404 = no carrier match; other 4xx could mean bad webKey / config issue
-        if (status === 404) {
-          console.warn(`⚠️ FMCSA: no match for ${candidate} (404)`);
-        } else {
-          console.error(`❌ FMCSA API ${status} for "${candidate}" — check FMCSA_API_KEY/config:`,
-            JSON.stringify(err.response?.data || err.message).slice(0, 300));
-        }
-      } else {
+      if (status && status >= 400 && status < 500 && status !== 404) {
+        // non-404 4xx could mean bad webKey / config issue — log loudly
+        console.error(`❌ FMCSA API ${status} for "${candidate}" — check FMCSA_API_KEY/config:`,
+          JSON.stringify(err.response?.data || err.message).slice(0, 300));
+      } else if (!status || status >= 500) {
         console.error(`❌ FMCSA lookup failed for "${candidate}":`, err.message);
       }
+      // 404 = no carrier match — expected often, try next variant quietly
     }
     await sleep(300); // rate-limit courtesy between calls
   }
 
+  console.warn(`⚠️ FMCSA: no match for ${baseNames[0]} (tried ${candidates.length} variants)`);
   return null;
 }
 
