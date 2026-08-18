@@ -118,11 +118,12 @@ async function fetchApolloContacts(state, city, limit = 100) {
 }
 
 // ─── FMCSA API ───
+// NOTE: superseded as a lead SOURCE — FMCSA is now used to ENRICH leads at
+// ingestion time (see src/sources/fmcsa.js → enrichWithFMCSA, wired into the
+// orchestrator loop and the Phantom webhook). This stub remains for export
+// compatibility.
 async function fetchFMCSANewFilings(state) {
-  // FMCSA doesn't have a simple REST API for new filings without registration.
-  // Alternative: Download their monthly snapshot CSV and parse.
-  // For now, return empty or implement if you have API access.
-  console.log('FMCSA source: Implement CSV snapshot download or API key');
+  console.log('FMCSA source: superseded by FMCSA enrichment (src/sources/fmcsa.js)');
   return [];
 }
 

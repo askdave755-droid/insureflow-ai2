@@ -2,6 +2,7 @@ const cron = require('node-cron');
 const prisma = require('./db');
 const { callQueue } = require('./queue');
 const { fetchApolloContacts, fetchLeOFromSFTP } = require('./sources');
+const { enrichWithFMCSA } = require('./sources/fmcsa');
 const { isBusinessHours, getNextBusinessTime } = require('./lib/validate');
 const config = require('./config');
 
@@ -53,6 +54,22 @@ async function ingestAndQueue() {
     if (!config.ALLOWED_STATES.includes(leadData.state)) continue;
     
     const lead = await prisma.lead.create({ data: leadData });
+    
+    // FMCSA enrichment — best-effort, never blocks queueing
+    try {
+      const fmcsa = await enrichWithFMCSA({
+        name: lead.name,
+        company: lead.company,
+        state: lead.state,
+        phone: lead.phone
+      });
+      if (fmcsa) {
+        await prisma.lead.update({ where: { id: lead.id }, data: fmcsa });
+        console.log(`🛡️ FMCSA enriched: ${lead.company || lead.name} DOT#${fmcsa.dotNumber} ${fmcsa.authorityStatus || ''}`.trim());
+      }
+    } catch (err) {
+      console.warn(`⚠️ FMCSA enrichment failed for lead ${lead.id}: ${err.message}`);
+    }
     
     // Calculate call time
     const delay = isBusinessHours(lead.state) 
