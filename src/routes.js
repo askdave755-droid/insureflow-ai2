@@ -181,6 +181,28 @@ function parseStateFromItem(item) {
   return m ? m[1].toUpperCase() : null;
 }
 
+// National megacarriers & chains that will never buy from an independent
+// agent — skip them so Brady doesn't burn Vapi minutes on 800-numbers.
+// Matched as case-insensitive substrings against the business name.
+const SKIP_BUSINESS_NAMES = [
+  'fedex', 'ups', 'usps', 'dhl',
+  'old dominion', 'abf freight', 'estes express', 'saia', 'tforce',
+  'xpo', 'r+l carriers', 'r + l carriers', 'usf holland', 'yrc',
+  'schneider national', 'j.b. hunt', 'jb hunt', 'swift transportation',
+  'knight transportation', 'knight-swift', 'werner enterprises',
+  'landstar', 'prime inc', 'crst', 'crete carrier', 'forward air',
+  'dayton freight', 'pitt ohio', 'southeastern freight',
+  'central transport', 'central freight', 'roadrunner',
+  'two men and a truck', 'college hunks', 'u-haul', 'uhaul',
+  'penske truck rental', 'ryder truck rental', 'budget truck'
+];
+
+function isSkippableBusiness(name) {
+  if (!name) return false;
+  const n = String(name).toLowerCase();
+  return SKIP_BUSINESS_NAMES.some(skip => n.includes(skip));
+}
+
 // Parse a value that may be an array OR a JSON-encoded string of an array.
 function parseMaybeStringArray(raw) {
   if (Array.isArray(raw) && raw.length) return raw;
@@ -297,10 +319,19 @@ router.post('/webhook/phantom', async (req, res) => {
 
     let queued = 0;
     let skipped = 0;
+    let skippedNational = 0;
 
     for (const item of results) {
       const phone = formatPhoneE164(item.phone || item.phoneNumber);
       if (!phone) { skipped++; continue; }
+
+      const company = item.title || item.name || item.companyName || null;
+
+      // Skip national megacarriers / chains — they don't buy from independents
+      if (isSkippableBusiness(company)) {
+        skippedNational++;
+        continue;
+      }
 
       // Dedupe: skip if an open lead with this phone already exists
       const existing = await prisma.lead.findFirst({
@@ -308,8 +339,9 @@ router.post('/webhook/phantom', async (req, res) => {
       });
       if (existing) { skipped++; continue; }
 
-      const company = item.title || item.name || item.companyName || null;
-      const state = (parseStateFromItem(item) || body.state || 'TX').toUpperCase();
+      // Default to MI (primary market) when the address can't be parsed —
+      // never silently tag a lead with the wrong state's calling-hours rules.
+      const state = (parseStateFromItem(item) || body.state || 'MI').toUpperCase();
 
       const lead = await prisma.lead.create({
         data: {
@@ -345,8 +377,8 @@ router.post('/webhook/phantom', async (req, res) => {
       queued++;
     }
 
-    console.log(`✅ Phantom webhook: ${queued} leads queued, ${skipped} skipped (dup/no-phone) of ${results.length}`);
-    res.json({ received: true, processed: results.length, queued, skipped });
+    console.log(`✅ Phantom webhook: ${queued} leads queued, ${skipped} skipped (dup/no-phone), ${skippedNational} national-carrier skips, of ${results.length}`);
+    res.json({ received: true, processed: results.length, queued, skipped, skippedNational });
   } catch (error) {
     console.error('❌ Phantom webhook error:', error);
     res.status(200).json({ received: true, queued: 0, error: error.message });
