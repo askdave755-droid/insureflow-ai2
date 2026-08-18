@@ -6,6 +6,7 @@ const { callQueue } = require('./queue');
 const { formatPhoneE164, isBusinessHours, getNextBusinessTime } = require('./lib/validate');
 const { handleVapiWebhook } = require('./workers/callWorker');
 const { sendEmailBrevo } = require('./lib/messaging');
+const { enrichWithFMCSA } = require('./sources/fmcsa');
 const config = require('./config');
 
 const router = express.Router();
@@ -300,6 +301,22 @@ router.post('/webhook/phantom', async (req, res) => {
           status: 'pending'
         }
       });
+
+      // FMCSA enrichment — best-effort, never blocks queueing
+      try {
+        const fmcsa = await enrichWithFMCSA({
+          name: lead.name,
+          company: lead.company,
+          state: lead.state,
+          phone: lead.phone
+        });
+        if (fmcsa) {
+          await prisma.lead.update({ where: { id: lead.id }, data: fmcsa });
+          console.log(`🛡️ FMCSA enriched: ${lead.company || lead.name} DOT#${fmcsa.dotNumber} ${fmcsa.authorityStatus || ''}`.trim());
+        }
+      } catch (err) {
+        console.warn(`⚠️ FMCSA enrichment failed for lead ${lead.id}: ${err.message}`);
+      }
 
       const delay = isBusinessHours(lead.state) ? 5000 : getNextBusinessTime(lead.state) - Date.now();
       await callQueue.add('make-call', { leadId: lead.id }, { delay: Math.max(delay, 0) });
