@@ -181,23 +181,42 @@ function parseStateFromItem(item) {
   return m ? m[1].toUpperCase() : null;
 }
 
+// Parse a value that may be an array OR a JSON-encoded string of an array.
+function parseMaybeStringArray(raw) {
+  if (Array.isArray(raw) && raw.length) return raw;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed) && parsed.length) return parsed;
+      } catch (e) {
+        console.warn('⚠️ Could not parse JSON string result payload:', e.message);
+      }
+    }
+  }
+  return null;
+}
+
 // Pull a resultObject array out of a fetch-output API response, defensively.
 function extractResultObject(data) {
   if (!data) return null;
-  if (Array.isArray(data.resultObject) && data.resultObject.length) return data.resultObject;
-  if (Array.isArray(data.results) && data.results.length) return data.results;
+  const direct = parseMaybeStringArray(data.resultObject) || parseMaybeStringArray(data.results);
+  if (direct) return direct;
   const out = data.output;
   if (out && typeof out === 'object') {
-    if (Array.isArray(out.resultObject) && out.resultObject.length) return out.resultObject;
+    const nested = parseMaybeStringArray(out.resultObject);
+    if (nested) return nested;
   }
   if (typeof out === 'string') {
-    // Output may be a string containing JSON with resultObject embedded
+    // Output may be log text with JSON containing resultObject embedded
     const idx = out.indexOf('"resultObject"');
     if (idx !== -1) {
       // Try parsing the whole string first
       try {
         const parsed = JSON.parse(out);
-        if (Array.isArray(parsed?.resultObject) && parsed.resultObject.length) return parsed.resultObject;
+        const nested = parseMaybeStringArray(parsed?.resultObject);
+        if (nested) return nested;
       } catch (_) { /* not full JSON */ }
       // Fallback: find the array start after "resultObject":
       try {
@@ -237,13 +256,16 @@ router.post('/webhook/phantom', async (req, res) => {
 
     const body = req.body || {};
 
-    // Case A: results included directly in the webhook body
-    let results = (Array.isArray(body.resultObject) && body.resultObject.length ? body.resultObject : null)
-               || (Array.isArray(body.results) && body.results.length ? body.results : null);
+    // Case A: results included directly in the webhook body.
+    // Phantom sends resultObject as a JSON-encoded STRING in completion
+    // notifications — parse string form as well as array form.
+    let results = parseMaybeStringArray(body.resultObject)
+               || parseMaybeStringArray(body.results);
 
     // Case B: completion NOTIFICATION — must fetch actual results from Phantom API
     if (!results) {
-      const agentId = body.agentId || body.agent_id || body.data?.agentId || body.data?.agent_id || null;
+      const agentId = body.agentId || body.agent_id || body.agent
+                   || body.data?.agentId || body.data?.agent_id || null;
 
       if (agentId) {
         if (!config.PHANTOM_API_KEY) {
