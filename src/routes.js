@@ -435,11 +435,26 @@ router.get('/admin/costs', async (req, res) => {
   res.json(costs);
 });
 
+// ─── ADMIN KEY GUARD ───
+// Diagnostic-friendly 401: reveals WHETHER the env key is loaded and its
+// length (never the value), so config problems are debuggable without logs.
+function requireAdminKey(req, res) {
+  const provided = req.headers['x-admin-key'];
+  if (!config.ADMIN_API_KEY || provided !== config.ADMIN_API_KEY) {
+    res.status(401).json({
+      error: 'Unauthorized',
+      keyConfigured: !!config.ADMIN_API_KEY,
+      expectedLength: config.ADMIN_API_KEY ? String(config.ADMIN_API_KEY).length : 0,
+      providedLength: provided ? String(provided).length : 0
+    });
+    return false;
+  }
+  return true;
+}
+
 // ─── NUCLEAR RESET ───
 router.post('/admin/nuclear-reset', async (req, res) => {
-  if (req.headers['x-admin-key'] !== config.ADMIN_API_KEY) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
+  if (!requireAdminKey(req, res)) return;
   
   await prisma.callLog.deleteMany();
   await prisma.cost.deleteMany();
@@ -454,9 +469,7 @@ router.post('/admin/nuclear-reset', async (req, res) => {
 // national-carrier/chain leads. Real scraped leads are kept. Requires
 // x-admin-key header like nuclear-reset.
 router.post('/admin/cleanup', async (req, res) => {
-  if (req.headers['x-admin-key'] !== config.ADMIN_API_KEY) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
+  if (!requireAdminKey(req, res)) return;
 
   try {
     // 1) Test leads by source
