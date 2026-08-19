@@ -106,14 +106,17 @@ function matchCarriers(payload) {
     dui_months_ago,
     revenue = 0,
     years_in_business = 0,
-    needs_reefer = true,
+    needs_reefer = false,
     needs_auto_hauler = false,
-    needs_sand_gravel = true
+    needs_sand_gravel = false
   } = payload;
 
   let matches = CARRIERS.filter(c => {
     if (!c.states.includes(state.toUpperCase())) return false;
-    const vertMatch = c.verticals.includes(vertical) || c.verticals.includes('general');
+    // 'general' vertical only counts if the carrier actually writes commercial_auto
+    // — otherwise cyber/BOP-only markets (Cowbell, Lemonade) match trucking risks.
+    const vertMatch = c.verticals.includes(vertical) ||
+      (c.verticals.includes('general') && c.lines.includes('commercial_auto'));
     if (!vertMatch) return false;
     if (vehicle_count < c.min_vehicles || vehicle_count > c.max_vehicles) return false;
     if (vehicle_age && c.max_vehicle_age && vehicle_age > c.max_vehicle_age) return false;
