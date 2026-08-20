@@ -38,7 +38,7 @@ router.get('/test-email', async (req, res) => {
     const html = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1a1a1a;">
         <div style="background: linear-gradient(135deg, #1e3a5f 0%, #2d5a87 100%); padding: 30px; text-align: center;">
-          <h1 style="color: #fff; margin: 0; font-size: 24px;">Smart Choice Agents</h1>
+          <h1 style="color: #fff; margin: 0; font-size: 24px;">Nexus G Partners</h1>
           <p style="color: #e0e0e0; margin: 10px 0 0;">Brevo Integration Test</p>
         </div>
         <div style="padding: 30px; background: #fff;">
