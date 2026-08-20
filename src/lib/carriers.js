@@ -93,7 +93,7 @@ function matchCarriers(payload) {
     if (years_in_business && c.min_years_in_business && years_in_business < c.min_years_in_business) return false;
     if (needs_reefer && !c.reefer_allowed) return false;
     if (needs_auto_hauler && !c.auto_hauler_allowed) return false;
-    if (needs_sand_gravel && !c.needs_sand_gravel) return false;
+    if (needs_sand_gravel && !c.sand_gravel_allowed) return false;
     return true;
   });
 
