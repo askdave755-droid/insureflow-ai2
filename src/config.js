@@ -1,5 +1,9 @@
 require('dotenv').config();
 
+// LICENSED LAUNCH STATES ONLY (verified via First Connect portal Aug 2026):
+// MI (resident), AZ (business entity), TN, FL — all Active with P&C authority.
+// TX/GA/AL expired 07/31/2026 — late-renew on NIPR, then uncomment below.
+// OH/IN unverified — uncomment only after confirming Active status.
 const STATE_CONFIG = {
   MI: {
     script: 'mfg_focus',
@@ -21,36 +25,6 @@ const STATE_CONFIG = {
     tone: 'relaxed',
     timezone: 'America/Phoenix'
   },
-  TX: {
-    script: 'aggressive_business',
-    priority: true,
-    vertical: 'commercial_auto',
-    carriers: 'Cover Whale, Nirvana, and RT Connector',
-    opener: 'Texas businesses need protection from liability risks',
-    wcAvailable: true,
-    tone: 'direct',
-    timezone: 'America/Chicago'
-  },
-  OH: {
-    script: 'rust_belt_mfg',
-    priority: true,
-    vertical: 'commercial_auto',
-    carriers: 'Cover Whale, Nirvana, and Forge',
-    opener: 'Ohio manufacturing has specific insurance needs',
-    wcAvailable: true,
-    tone: 'consultative',
-    timezone: 'America/New_York'
-  },
-  AL: {
-    script: 'manufacturing_growth',
-    priority: false,
-    vertical: 'commercial_auto',
-    carriers: 'Cover Whale and RT Connector',
-    opener: 'Alabama manufacturing is growing fast',
-    wcAvailable: true,
-    tone: 'friendly',
-    timezone: 'America/Chicago'
-  },
   TN: {
     script: 'freight_logistics',
     priority: true,
@@ -61,26 +35,23 @@ const STATE_CONFIG = {
     tone: 'friendly',
     timezone: 'America/Chicago'
   },
-  GA: {
-    script: 'port_trucking',
+  FL: {
+    script: 'port_logistics',
     priority: true,
     vertical: 'commercial_auto',
-    carriers: 'Cover Whale and Nirvana',
-    opener: 'Atlanta and Savannah port trucking is booming',
+    carriers: 'Diesel Insurance and RT Connector',
+    opener: 'Florida port and logistics trucking is booming',
     wcAvailable: true,
     tone: 'friendly',
     timezone: 'America/New_York'
-  },
-  IN: {
-    script: 'logistics_corridor',
-    priority: true,
-    vertical: 'commercial_auto',
-    carriers: 'Cover Whale, Nirvana, and Forge',
-    opener: 'Indiana logistics corridor means fleet growth',
-    wcAvailable: true,
-    tone: 'friendly',
-    timezone: 'America/Indiana/Indianapolis'
   }
+  // PENDING RENEWAL (expired 07/31/2026 — late-renew on NIPR):
+  // TX: { script: 'aggressive_business', priority: true, vertical: 'commercial_auto', carriers: 'Cover Whale, Nirvana, and RT Connector', opener: 'Texas businesses need protection from liability risks', wcAvailable: true, tone: 'direct', timezone: 'America/Chicago' },
+  // GA: { script: 'port_trucking', priority: true, vertical: 'commercial_auto', carriers: 'Cover Whale and Nirvana', opener: 'Atlanta and Savannah port trucking is booming', wcAvailable: true, tone: 'friendly', timezone: 'America/New_York' },
+  // AL: { script: 'manufacturing_growth', priority: false, vertical: 'commercial_auto', carriers: 'Cover Whale and RT Connector', opener: 'Alabama manufacturing is growing fast', wcAvailable: true, tone: 'friendly', timezone: 'America/Chicago' },
+  // UNVERIFIED LICENSE STATUS:
+  // OH: { script: 'rust_belt_mfg', priority: true, vertical: 'commercial_auto', carriers: 'Cover Whale, Nirvana, and Forge', opener: 'Ohio manufacturing has specific insurance needs', wcAvailable: true, tone: 'consultative', timezone: 'America/New_York' },
+  // IN: { script: 'logistics_corridor', priority: true, vertical: 'commercial_auto', carriers: 'Cover Whale, Nirvana, and Forge', opener: 'Indiana logistics corridor means fleet growth', wcAvailable: true, tone: 'friendly', timezone: 'America/Indiana/Indianapolis' }
 };
 
 const ALLOWED_STATES = Object.keys(STATE_CONFIG);
