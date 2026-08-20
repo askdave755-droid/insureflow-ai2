@@ -1,7 +1,7 @@
 // ============================================
 // SMS / EMAIL MESSAGING - BREVO ONLY
 // src/lib/messaging.js
-// Replaces TextMagic with Brevo SMS + Email
+// Nexus G Partners branding (replaces Smart Choice)
 // ============================================
 
 const axios = require('axios');
@@ -21,7 +21,7 @@ async function sendSMS(to, message) {
     const response = await axios.post(
       'https://api.brevo.com/v3/transactionalSMS/sms',
       {
-        sender: 'InsureFlow',
+        sender: 'NexusG',
         recipient: formatted,
         content: message,
         type: 'transactional'
@@ -51,7 +51,7 @@ async function sendEmail(to, subject, html, text) {
     const response = await axios.post(
       'https://api.brevo.com/v3/smtp/email',
       {
-        sender: { name: 'Brady @ Smart Choice', email: EMAIL_FROM },
+        sender: { name: 'Brady @ Nexus G Partners', email: EMAIL_FROM },
         to: [{ email: to }],
         subject,
         htmlContent: html,
@@ -77,7 +77,7 @@ async function sendQualificationFollowUp(lead, carrierNames) {
   const firstName = lead.name?.split(' ')[0] || 'there';
   const company = lead.company || 'your business';
 
-  const smsBody = `${firstName}, Brady here. I found options for ${company} through ${carrierNames}. Grab a time: ${CALENDLY_LINK}`;
+  const smsBody = `${firstName}, Brady here from Nexus G Partners. I found options for ${company} through ${carrierNames}. Grab a time: ${CALENDLY_LINK}`;
   await sendSMS(lead.phone, smsBody);
 
   if (lead.email) {
@@ -88,7 +88,7 @@ async function sendQualificationFollowUp(lead, carrierNames) {
         <p>I've identified the best carriers for your risk profile: <strong>${carrierNames}</strong>.</p>
         <p>Let's lock in a 15-minute comparison:</p>
         <a href="${CALENDLY_LINK}" style="display:inline-block;background:#f59e0b;color:#0f172a;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:700;">Book My Call</a>
-        <p style="margin-top:24px;font-size:13px;color:#64748b;">Brady | Smart Choice Agents</p>
+        <p style="margin-top:24px;font-size:13px;color:#64748b;">Brady | Nexus G Partners</p>
       </div>
     `;
     await sendEmail(lead.email, `Insurance options ready for ${company}`, html, `Hi ${firstName}, I've identified carriers for ${company}: ${carrierNames}. Book here: ${CALENDLY_LINK}`);
@@ -111,7 +111,7 @@ async function sendEmailBrevo(lead, subject, html, text) {
 }
 
 // Old signature: handleQualifiedLead(lead)
-// Now carrier-aware: names the top 3 matched carriers in the SMS + email.
+// Carrier-aware: names the top 3 matched carriers in the SMS + email.
 async function handleQualifiedLead(lead) {
   let carrierNames = 'our top carriers';
   try {
