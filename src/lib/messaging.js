@@ -77,7 +77,8 @@ async function sendQualificationFollowUp(lead, carrierNames) {
   const firstName = lead.name?.split(' ')[0] || 'there';
   const company = lead.company || 'your business';
 
-  const smsBody = `${firstName}, Brady here from Nexus G Partners. I found options for ${company} through ${carrierNames}. Grab a time: ${CALENDLY_LINK}`;
+  // Carrier-compliant: express verbal consent captured on the call, STOP language required for US toll-free/10DLC
+  const smsBody = `${firstName}, Brady here from Nexus G Partners. I found options for ${company} through ${carrierNames}. Grab a time: ${CALENDLY_LINK} Reply STOP to opt out.`;
   await sendSMS(lead.phone, smsBody);
 
   if (lead.email) {
