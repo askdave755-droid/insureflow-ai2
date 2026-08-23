@@ -12,10 +12,12 @@ function safeEqual(a, b) {
 }
 
 // Admin-key guard for all /admin/* and /test-* endpoints.
+// Accepts the key as x-admin-key header OR ?key= query param — the query
+// form makes every admin/test endpoint openable from a phone browser.
 // Diagnostic-friendly 401: reveals whether the env key is loaded and the
 // provided length (never the value) so config issues are debuggable.
 function requireAdminKey(req, res, next) {
-  const provided = req.headers['x-admin-key'];
+  const provided = req.headers['x-admin-key'] || req.query.key;
   if (!config.ADMIN_API_KEY || !provided || !safeEqual(String(provided), String(config.ADMIN_API_KEY))) {
     return res.status(401).json({
       error: 'Unauthorized',
@@ -57,7 +59,7 @@ function verifyPhantomWebhook(req, res, next) {
 }
 
 function actorFromRequest(req, fallback = 'system') {
-  if (req.headers['x-admin-key']) return 'admin';
+  if (req.headers['x-admin-key'] || req.query.key) return 'admin';
   if (req.path.includes('vapi')) return 'webhook:vapi';
   if (req.path.includes('phantom')) return 'webhook:phantom';
   return fallback;
