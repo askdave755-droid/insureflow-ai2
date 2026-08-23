@@ -122,6 +122,15 @@ model Lead {
   complianceNotes  String?          @map("compliance_notes") @db.Text
   accountId        String?          @map("account_id")
 
+  // Phase 2 — transportation intelligence
+  riskScore        Int?             @map("risk_score")
+  opportunityScore Int?             @map("opportunity_score")
+  scoreBand        String?          @map("score_band")       // HOT / GOOD / NURTURE / DONT_WASTE_TIME
+  xdateTier        String?          @map("xdate_tier")       // STRIKE_ZONE / ACTIVE / EARLY / NURTURE ...
+  operatingRadius  String?          @map("operating_radius") // local / regional / interstate
+  hazmat           Boolean?
+  interstate       Boolean?
+
   account      Account?       @relation(fields: [accountId], references: [id], onDelete: SetNull)
   callLogs     CallLog[]
   costs        Cost[]
@@ -132,6 +141,8 @@ model Lead {
   @@index([scheduledCallAt])
   @@index([status, qualified])
   @@index([accountId])
+  @@index([scoreBand, opportunityScore])
+  @@index([xdateTier])
   @@map("leads")
 }
 

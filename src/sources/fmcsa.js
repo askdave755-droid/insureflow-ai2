@@ -5,7 +5,8 @@ const config = require('../config');
 // Public carrier lookup API: https://mobile.fmcsa.dot.gov/qc/services/carriers
 // Auth: webKey query param (FMCSA_API_KEY env). We enrich new leads by matching
 // company/name to a registered motor carrier to grab DOT/MC numbers, fleet size
-// (power units), driver count, and operating authority status.
+// (power units), driver count, and operating authority status. Phase 2 adds a
+// per-DOT detail fetch for operating radius, hazmat flag, and interstate status.
 const FMCSA_BASE = 'https://mobile.fmcsa.dot.gov/qc/services/carriers';
 
 let warnedNoKey = false;
@@ -154,8 +155,56 @@ async function lookupByName(name, state) {
   return best ? mapCarrier(best) : null;
 }
 
+// ─── Phase 2: per-DOT detail fetch ───
+// Grabs operating radius (interstate vs intrastate/local), hazmat flag, and
+// cargo description from the carrier detail record. Returns null on failure.
+async function fetchCarrierDetail(dotNumber) {
+  const res = await axios.get(`${FMCSA_BASE}/${dotNumber}`, {
+    params: { webKey: config.FMCSA_API_KEY },
+    timeout: 15000
+  });
+  const carriers = extractCarriers(res.data);
+  const c = carriers[0];
+  if (!c) return null;
+
+  const opClass = String(
+    c.carrierOperation?.operationClassDesc
+    ?? c.operationClassDesc
+    ?? c.operationClass
+    ?? ''
+  ).toLowerCase();
+
+  const interstateRaw = String(
+    c.carrierOperation?.interstate ?? c.interstate ?? ''
+  ).toUpperCase();
+  const interstate = opClass.includes('interstate') || interstateRaw === 'Y';
+
+  const operatingRadius = opClass.includes('interstate')
+    ? 'interstate'
+    : (opClass.includes('intrastate') || opClass.includes('local'))
+      ? 'local'
+      : (interstate ? 'interstate' : null);
+
+  const cargoRaw = c.cargoCarried ?? c.cargo ?? null;
+  const cargoText = JSON.stringify(cargoRaw || '').toLowerCase();
+  const hmFlag = String(c.hmFlag ?? c.hazmatFlag ?? '').toUpperCase();
+  const hazmat = cargoText.includes('hazard') || cargoText.includes('hazmat') || hmFlag === 'Y';
+
+  let cargoDescription = null;
+  if (Array.isArray(cargoRaw) && cargoRaw.length) {
+    cargoDescription = cargoRaw
+      .map(x => (x && (x.cargoDesc || x.description)) || String(x))
+      .join(', ');
+  } else if (typeof cargoRaw === 'string' && cargoRaw) {
+    cargoDescription = cargoRaw;
+  }
+
+  return { operatingRadius, hazmat, interstate, cargoDescription };
+}
+
 // Enrich a lead with FMCSA carrier data. Never throws.
-// Returns { dotNumber, mcNumber, vehicleCount, driverCount, authorityStatus } or null.
+// Returns { dotNumber, mcNumber, vehicleCount, driverCount, authorityStatus,
+//           operatingRadius?, hazmat?, interstate? } or null.
 async function enrichWithFMCSA({ name, company, state, phone }) {
   if (!config.FMCSA_API_KEY) {
     if (!warnedNoKey) {
@@ -188,6 +237,16 @@ async function enrichWithFMCSA({ name, company, state, phone }) {
         if (candidate !== baseNames[0]) {
           console.log(`🛡️ FMCSA matched via shortened name: "${candidate}"`);
         }
+        // Phase 2 — merge in radius / hazmat / interstate detail (best-effort)
+        try {
+          const detail = await fetchCarrierDetail(result.dotNumber);
+          if (detail) {
+            console.log(`🛡️ FMCSA detail: DOT#${result.dotNumber} radius=${detail.operatingRadius || '?'} hazmat=${detail.hazmat} interstate=${detail.interstate}`);
+            return { ...result, ...detail };
+          }
+        } catch (detailErr) {
+          console.warn(`⚠️ FMCSA detail fetch failed for DOT#${result.dotNumber}: ${detailErr.message}`);
+        }
         return result;
       }
     } catch (err) {
@@ -208,4 +267,4 @@ async function enrichWithFMCSA({ name, company, state, phone }) {
   return null;
 }
 
-module.exports = { enrichWithFMCSA };
+module.exports = { enrichWithFMCSA, fetchCarrierDetail };

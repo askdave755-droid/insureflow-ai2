@@ -7,6 +7,7 @@ const { formatPhoneE164, isBusinessHours, getNextBusinessTime } = require('./lib
 const { handleVapiWebhook } = require('./workers/callWorker');
 const { sendEmailBrevo } = require('./lib/messaging');
 const { enrichWithFMCSA } = require('./sources/fmcsa');
+const { runIntelligence } = require('./lib/intel');
 const config = require('./config');
 const { requireAdminKey, verifyVapiWebhook, verifyPhantomWebhook, actorFromRequest } = require('./lib/auth');
 const { auditMiddleware, audit } = require('./lib/audit');
@@ -16,9 +17,17 @@ const router = express.Router();
 router.use(auditMiddleware());
 
 // Gate every outreach queueing decision through the compliance engine.
+// queueOpts (from runIntelligence): { skip, bullPriority, reason } — a skip
+// sends the lead to nurture without ever hitting the compliance engine.
 // Returns { queued, delay, lead } — handles hold (schedule at retryAt) and
 // blocked (compliance_hold, no queue) states.
-async function complianceGateAndQueue(lead, actor) {
+async function complianceGateAndQueue(lead, actor, queueOpts = {}) {
+  if (queueOpts.skip) {
+    await prisma.lead.update({ where: { id: lead.id }, data: { status: 'nurture' } });
+    console.log(`🌱 Lead ${lead.id} scored DONT_WASTE_TIME — nurtured, not queued`);
+    return { queued: false, nurtured: true, reasons: [queueOpts.reason || 'Score below threshold'] };
+  }
+  const priority = queueOpts.bullPriority || 10;
   const check = await checkContactPermission(lead, 'call', actor);
   if (check.status === 'blocked') {
     await prisma.lead.update({ where: { id: lead.id }, data: { status: 'compliance_hold' } });
@@ -29,12 +38,12 @@ async function complianceGateAndQueue(lead, actor) {
     const retryAt = check.retryAt ? check.retryAt.getTime() : getNextBusinessTime(lead.state);
     const delay = Math.max(retryAt - Date.now(), 60000);
     await prisma.lead.update({ where: { id: lead.id }, data: { status: 'scheduled', scheduledCallAt: new Date(retryAt) } });
-    await callQueue.add('make-call', { leadId: lead.id }, { delay });
+    await callQueue.add('make-call', { leadId: lead.id }, { delay, priority });
     console.log(`⏸️ Compliance HOLD lead ${lead.id} — retry scheduled ${new Date(retryAt).toISOString()}`);
     return { queued: true, held: true, delay, reasons: check.reasons };
   }
   const delay = 5000;
-  await callQueue.add('make-call', { leadId: lead.id }, { delay });
+  await callQueue.add('make-call', { leadId: lead.id }, { delay, priority });
   return { queued: true, delay };
 }
 
@@ -124,11 +133,26 @@ router.post('/api/leads', async (req, res) => {
       status: 'pending'
     }
   });
-  
-  const gate = await complianceGateAndQueue(lead, actorFromRequest(req, 'api'));
-  await req.audit({ actor: actorFromRequest(req, 'api'), action: 'create', entityType: 'Lead', entityId: lead.id, after: { name: lead.name, phone: lead.phone, state: lead.state, source: lead.source }, metadata: { gate } });
 
-  res.json({ success: true, lead, ...gate });
+  // Phase 2 — score, tier, prioritize before compliance gate
+  const intel = runIntelligence(lead);
+  await prisma.lead.update({ where: { id: lead.id }, data: intel.updates });
+  
+  const gate = await complianceGateAndQueue(lead, actorFromRequest(req, 'api'), intel.queue);
+  await req.audit({ actor: actorFromRequest(req, 'api'), action: 'create', entityType: 'Lead', entityId: lead.id, after: { name: lead.name, phone: lead.phone, state: lead.state, source: lead.source }, metadata: { gate, scores: intel.scores } });
+
+  res.json({
+    success: true,
+    lead: { ...lead, ...intel.updates },
+    scores: {
+      riskScore: intel.scores.riskScore,
+      opportunityScore: intel.scores.opportunityScore,
+      combined: intel.scores.combined,
+      band: intel.scores.band
+    },
+    xdate: intel.xdate,
+    ...gate
+  });
 });
 
 // ─── BROWSER-FRIENDLY TEST CALL ───
@@ -179,6 +203,30 @@ router.get('/api/leads', async (req, res) => {
     include: { callLogs: { orderBy: { createdAt: 'desc' }, take: 1 } }
   });
   
+  res.json(leads);
+});
+
+// ─── PIPELINE VIEW (Phase 2 — prioritized prospect list) ───
+// GET /api/pipeline?band=HOT&tier=STRIKE_ZONE&state=MI&minScore=60&limit=50
+router.get('/api/pipeline', requireAdminKey, async (req, res) => {
+  const { band, minScore, tier, state, limit = 50 } = req.query;
+  const where = { status: { notIn: ['closed', 'compliance_hold'] } };
+  if (band) where.scoreBand = band.toUpperCase();
+  if (tier) where.xdateTier = tier.toUpperCase();
+  if (state) where.state = state.toUpperCase();
+  if (minScore) where.opportunityScore = { gte: parseInt(minScore) };
+  const leads = await prisma.lead.findMany({
+    where,
+    orderBy: [{ opportunityScore: 'desc' }, { riskScore: 'desc' }],
+    take: parseInt(limit),
+    select: {
+      id: true, name: true, company: true, phone: true, state: true, city: true,
+      status: true, source: true, dotNumber: true, vehicleCount: true,
+      currentCarrier: true, xDate: true, xdateTier: true,
+      riskScore: true, opportunityScore: true, scoreBand: true,
+      operatingRadius: true, hazmat: true, createdAt: true
+    }
+  });
   res.json(leads);
 });
 
@@ -392,14 +440,19 @@ router.post('/webhook/phantom', verifyPhantomWebhook, async (req, res) => {
         });
         if (fmcsa) {
           await prisma.lead.update({ where: { id: lead.id }, data: fmcsa });
+          Object.assign(lead, fmcsa);
           console.log(`🛡️ FMCSA enriched: ${lead.company || lead.name} DOT#${fmcsa.dotNumber} ${fmcsa.authorityStatus || ''}`.trim());
         }
       } catch (err) {
         console.warn(`⚠️ FMCSA enrichment failed for lead ${lead.id}: ${err.message}`);
       }
 
-      const gate = await complianceGateAndQueue(lead, 'webhook:phantom');
-      if (gate.blocked) { skipped++; continue; }
+      // Phase 2 — score, tier, prioritize before compliance gate
+      const intel = runIntelligence(lead);
+      await prisma.lead.update({ where: { id: lead.id }, data: intel.updates });
+
+      const gate = await complianceGateAndQueue(lead, 'webhook:phantom', intel.queue);
+      if (gate.blocked || gate.nurtured) { skipped++; continue; }
       queued++;
     }
 
