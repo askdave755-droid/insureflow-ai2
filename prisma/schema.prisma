@@ -131,10 +131,15 @@ model Lead {
   hazmat           Boolean?
   interstate       Boolean?
 
+  // Phase 3 — sales engine
+  callAttempts     Int              @default(0) @map("call_attempts")
+  lastDisposition  String?          @map("last_disposition") // booked / callback / no_answer / dnc ...
+
   account      Account?       @relation(fields: [accountId], references: [id], onDelete: SetNull)
   callLogs     CallLog[]
   costs        Cost[]
   opportunities Opportunity[]
+  tasks        Task[]
 
   @@index([state, status])
   @@index([source, createdAt])
@@ -156,6 +161,7 @@ model CallLog {
   transcript   String?  @db.Text
   summary      String?  @db.Text
   qualified    Boolean  @default(false)
+  disposition  String?  // Phase 3 — booked / callback / interested / not_interested / dnc / no_answer
   recordingUrl String?  @map("recording_url")
   createdAt    DateTime @default(now()) @map("created_at")
 
@@ -240,6 +246,7 @@ model Account {
   opportunities Opportunity[]
   policies      Policy[]
   renewals      Renewal[]
+  tasks         Task[]
 
   @@index([state])
   @@index([dotNumber])
@@ -272,11 +279,40 @@ model Opportunity {
   account     Account      @relation(fields: [accountId], references: [id], onDelete: Cascade)
   lead        Lead?        @relation(fields: [leadId], references: [id], onDelete: SetNull)
   submissions Submission[]
+  tasks       Task[]
 
   @@index([accountId, stage])
   @@index([stage, priority])
   @@index([xDate])
   @@map("opportunities")
+}
+
+// ─── TASK (Phase 3 — Dave's to-do list, created by the engines) ───
+model Task {
+  id            String   @id @default(uuid())
+  leadId        String?  @map("lead_id")
+  opportunityId String?  @map("opportunity_id")
+  accountId     String?  @map("account_id")
+
+  type          String   // CALL_BACK / FOLLOW_UP / REVIEW / SEND_QUOTE / SERVICE
+  title         String
+  notes         String?  @db.Text
+  dueAt         DateTime? @map("due_at")
+  status        String   @default("open") // open / done / cancelled
+  priority      String   @default("normal") // hot / high / normal / low
+
+  completedAt   DateTime? @map("completed_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  lead        Lead?        @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  opportunity Opportunity? @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+  account     Account?     @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([status, dueAt])
+  @@index([leadId])
+  @@index([opportunityId])
+  @@map("tasks")
 }
 
 // ─── SUBMISSION (a carrier-ready package for one market) ───
