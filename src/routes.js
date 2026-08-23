@@ -10,6 +10,9 @@ const { enrichWithFMCSA } = require('./sources/fmcsa');
 const { runIntelligence } = require('./lib/intel');
 const { promoteLead } = require('./lib/convert');
 const { assertTransition } = require('./lib/pipeline');
+const { createSubmissions, submitSubmission } = require('./lib/submissions');
+const { recordQuote, presentQuote, acceptQuote, declineQuote } = require('./lib/quotes');
+const { matchCarriers } = require('./lib/carriers');
 const config = require('./config');
 const { requireAdminKey, verifyVapiWebhook, verifyPhantomWebhook, actorFromRequest } = require('./lib/auth');
 const { auditMiddleware, audit } = require('./lib/audit');
@@ -328,6 +331,150 @@ router.post('/api/opportunities/:id/stage', requireAdminKey, async (req, res) =>
     after: { stage: opportunity.stage, lostReason: opportunity.lostReason }
   });
   res.json({ success: true, opportunity });
+});
+
+// ═══════════════════════════════════════════════════════
+// PHASE 4 — INSURANCE PRODUCTION ENDPOINTS
+// ═══════════════════════════════════════════════════════
+
+// ─── CARRIER APPETITE PREVIEW ───
+// GET /api/carriers/match?state=MI&vehicles=5&hazmat=false
+router.get('/api/carriers/match', requireAdminKey, (req, res) => {
+  const { state, vehicles = 1, hazmat = 'false', revenue = 0 } = req.query;
+  if (!state) return res.status(400).json({ error: 'state required' });
+  const result = matchCarriers({
+    state,
+    vertical: 'trucking',
+    vehicle_count: parseInt(vehicles),
+    has_hazmat: hazmat === 'true',
+    revenue: parseInt(revenue) || 0
+  });
+  res.json(result);
+});
+
+// ─── BUILD SUBMISSIONS (carrier-matched, ACORD-style package) ───
+// POST /api/opportunities/:id/submissions  { carriers?: [names], count?: 3 }
+router.post('/api/opportunities/:id/submissions', requireAdminKey, async (req, res) => {
+  try {
+    const result = await createSubmissions(req.params.id, req.body || {}, actorFromRequest(req, 'admin'));
+    res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('❌ Submission build failed:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.get('/api/opportunities/:id/submissions', requireAdminKey, async (req, res) => {
+  const submissions = await prisma.submission.findMany({
+    where: { opportunityId: req.params.id },
+    include: { quotes: true },
+    orderBy: { createdAt: 'asc' }
+  });
+  res.json(submissions);
+});
+
+// Mark a submission sent to the carrier
+router.post('/api/submissions/:id/submit', requireAdminKey, async (req, res) => {
+  try {
+    const submission = await submitSubmission(req.params.id, actorFromRequest(req, 'admin'));
+    res.json({ success: true, submission });
+  } catch (error) {
+    console.error('❌ Submit failed:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Decline / withdraw a submission (carrier said no, or we pulled it)
+router.post('/api/submissions/:id/decline', requireAdminKey, async (req, res) => {
+  const { reason } = req.body || {};
+  const before = await prisma.submission.findUnique({ where: { id: req.params.id } });
+  if (!before) return res.status(404).json({ error: 'Not found' });
+  try {
+    assertTransition('Submission', before.status, 'DECLINED');
+  } catch (err) {
+    return res.status(400).json({ error: err.message, from: before.status, to: 'DECLINED' });
+  }
+  const submission = await prisma.submission.update({
+    where: { id: req.params.id },
+    data: { status: 'DECLINED', declinedReason: reason || null, respondedAt: new Date() }
+  });
+  await req.audit({ actor: actorFromRequest(req, 'admin'), action: 'stage_change', entityType: 'Submission', entityId: submission.id, before: { status: before.status }, after: { status: 'DECLINED', reason } });
+  res.json({ success: true, submission });
+});
+
+// ─── QUOTES ───
+// Record a carrier's quote response
+// POST /api/submissions/:id/quotes { premium, commissionRate, coverages, effectiveDate, expirationDate, notes }
+router.post('/api/submissions/:id/quotes', requireAdminKey, async (req, res) => {
+  try {
+    const quote = await recordQuote(req.params.id, req.body || {}, actorFromRequest(req, 'admin'));
+    res.json({ success: true, quote });
+  } catch (error) {
+    console.error('❌ Record quote failed:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.post('/api/quotes/:id/present', requireAdminKey, async (req, res) => {
+  try {
+    const quote = await presentQuote(req.params.id, actorFromRequest(req, 'admin'));
+    res.json({ success: true, quote });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Insured accepted — binds the policy, seeds the renewal, tasks Dave
+router.post('/api/quotes/:id/accept', requireAdminKey, async (req, res) => {
+  try {
+    const result = await acceptQuote(req.params.id, actorFromRequest(req, 'admin'));
+    res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('❌ Accept/bind failed:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+router.post('/api/quotes/:id/decline', requireAdminKey, async (req, res) => {
+  try {
+    const quote = await declineQuote(req.params.id, req.body?.reason || null, actorFromRequest(req, 'admin'));
+    res.json({ success: true, quote });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ─── BOOK OF BUSINESS ───
+router.get('/api/policies', requireAdminKey, async (req, res) => {
+  const { status = 'ACTIVE', limit = 100 } = req.query;
+  const where = {};
+  if (status !== 'all') where.status = status;
+  const policies = await prisma.policy.findMany({
+    where,
+    orderBy: { expirationDate: 'asc' },
+    take: parseInt(limit),
+    include: {
+      account: { select: { id: true, company: true, state: true, phone: true } },
+      quote: { select: { id: true, carrier: true, premium: true } }
+    }
+  });
+  res.json(policies);
+});
+
+router.get('/api/renewals', requireAdminKey, async (req, res) => {
+  const { stage, daysUntil = 120, limit = 100 } = req.query;
+  const where = { renewalDate: { lte: new Date(Date.now() + parseInt(daysUntil) * 86400000) } };
+  if (stage) where.stage = stage.toUpperCase();
+  const renewals = await prisma.renewal.findMany({
+    where,
+    orderBy: { renewalDate: 'asc' },
+    take: parseInt(limit),
+    include: {
+      account: { select: { id: true, company: true, state: true, phone: true } },
+      policy: { select: { id: true, carrier: true, premium: true, expirationDate: true } }
+    }
+  });
+  res.json(renewals);
 });
 
 // ─── VAPI WEBHOOK ───
