@@ -8,6 +8,8 @@ const { handleVapiWebhook } = require('./workers/callWorker');
 const { sendEmailBrevo } = require('./lib/messaging');
 const { enrichWithFMCSA } = require('./sources/fmcsa');
 const { runIntelligence } = require('./lib/intel');
+const { promoteLead } = require('./lib/convert');
+const { assertTransition } = require('./lib/pipeline');
 const config = require('./config');
 const { requireAdminKey, verifyVapiWebhook, verifyPhantomWebhook, actorFromRequest } = require('./lib/auth');
 const { auditMiddleware, audit } = require('./lib/audit');
@@ -228,6 +230,104 @@ router.get('/api/pipeline', requireAdminKey, async (req, res) => {
     }
   });
   res.json(leads);
+});
+
+// ═══════════════════════════════════════════════════════
+// PHASE 3 — SALES ENGINE ENDPOINTS
+// ═══════════════════════════════════════════════════════
+
+// ─── TASKS (Dave's to-do list) ───
+// GET /api/tasks?status=open&priority=hot&dueBefore=2026-09-01&limit=50
+router.get('/api/tasks', requireAdminKey, async (req, res) => {
+  const { status = 'open', priority, dueBefore, limit = 50 } = req.query;
+  const where = {};
+  if (status !== 'all') where.status = status;
+  if (priority) where.priority = priority;
+  if (dueBefore) where.dueAt = { lte: new Date(dueBefore) };
+  const tasks = await prisma.task.findMany({
+    where,
+    orderBy: [{ dueAt: 'asc' }, { createdAt: 'desc' }],
+    take: parseInt(limit),
+    include: {
+      lead: { select: { id: true, name: true, company: true, phone: true, state: true, scoreBand: true, xDate: true } },
+      opportunity: { select: { id: true, stage: true, priority: true, xDate: true } }
+    }
+  });
+  res.json(tasks);
+});
+
+router.post('/api/tasks/:id/done', requireAdminKey, async (req, res) => {
+  const before = await prisma.task.findUnique({ where: { id: req.params.id } });
+  if (!before) return res.status(404).json({ error: 'Not found' });
+  const task = await prisma.task.update({
+    where: { id: req.params.id },
+    data: { status: 'done', completedAt: new Date() }
+  });
+  await req.audit({ actor: actorFromRequest(req, 'admin'), action: 'task_done', entityType: 'Task', entityId: task.id, before, after: task });
+  res.json({ success: true, task });
+});
+
+// ─── MANUAL PROMOTION (lead → account + opportunity) ───
+router.post('/api/leads/:id/promote', requireAdminKey, async (req, res) => {
+  try {
+    const result = await promoteLead(req.params.id, actorFromRequest(req, 'admin'));
+    res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('❌ Promote failed:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ─── OPPORTUNITIES ───
+// GET /api/opportunities?stage=QUALIFIED&priority=hot&limit=50
+router.get('/api/opportunities', requireAdminKey, async (req, res) => {
+  const { stage, priority, limit = 50 } = req.query;
+  const where = {};
+  if (stage) where.stage = stage.toUpperCase();
+  if (priority) where.priority = priority;
+  const opportunities = await prisma.opportunity.findMany({
+    where,
+    orderBy: [{ priority: 'asc' }, { xDate: 'asc' }],
+    take: parseInt(limit),
+    include: {
+      account: { select: { id: true, company: true, state: true, phone: true, dotNumber: true, vehicleCount: true } },
+      lead: { select: { id: true, name: true, phone: true, email: true, scoreBand: true, lastDisposition: true } }
+    }
+  });
+  res.json(opportunities);
+});
+
+// Move an opportunity through the pipeline — illegal jumps are rejected
+router.post('/api/opportunities/:id/stage', requireAdminKey, async (req, res) => {
+  const { stage, lostReason } = req.body || {};
+  if (!stage) return res.status(400).json({ error: 'stage required' });
+
+  const before = await prisma.opportunity.findUnique({ where: { id: req.params.id } });
+  if (!before) return res.status(404).json({ error: 'Not found' });
+
+  try {
+    assertTransition('Opportunity', before.stage, stage.toUpperCase());
+  } catch (err) {
+    return res.status(400).json({ error: err.message, from: before.stage, to: stage });
+  }
+
+  const data = { stage: stage.toUpperCase() };
+  if (stage.toUpperCase() === 'LOST') {
+    data.lostReason = lostReason || null;
+    data.closedAt = new Date();
+  }
+  if (stage.toUpperCase() === 'BOUND') data.closedAt = new Date();
+
+  const opportunity = await prisma.opportunity.update({ where: { id: req.params.id }, data });
+  await req.audit({
+    actor: actorFromRequest(req, 'admin'),
+    action: 'stage_change',
+    entityType: 'Opportunity',
+    entityId: opportunity.id,
+    before: { stage: before.stage },
+    after: { stage: opportunity.stage, lostReason: opportunity.lostReason }
+  });
+  res.json({ success: true, opportunity });
 });
 
 // ─── VAPI WEBHOOK ───
@@ -517,6 +617,7 @@ router.get('/admin/costs', requireAdminKey, async (req, res) => {
 // ─── NUCLEAR RESET ───
 router.post('/admin/nuclear-reset', requireAdminKey, async (req, res) => {
   await prisma.callLog.deleteMany();
+  await prisma.task.deleteMany();
   await prisma.cost.deleteMany();
   await prisma.lead.deleteMany();
   await prisma.dailyStat.deleteMany();
