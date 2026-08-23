@@ -4,17 +4,21 @@ const { callQueue } = require('./queue');
 const { fetchApolloContacts, fetchLeOFromSFTP } = require('./sources');
 const { enrichWithFMCSA } = require('./sources/fmcsa');
 const { isBusinessHours, getNextBusinessTime } = require('./lib/validate');
+const { runIntelligence, summarize } = require('./lib/intel');
 const config = require('./config');
 
+// Licensed states only (MI resident; AZ/TN/FL active non-resident).
+// TX/GA/OH/IN removed — licenses expired/unverified as of Aug 2026.
 const SOURCES = [
   { state: 'MI', city: 'Detroit' },
   { state: 'MI', city: 'Grand Rapids' },
-  { state: 'TX', city: 'Houston' },
-  { state: 'TX', city: 'Dallas' },
-  { state: 'OH', city: 'Columbus' },
+  { state: 'MI', city: 'Lansing' },
   { state: 'TN', city: 'Memphis' },
-  { state: 'GA', city: 'Atlanta' },
-  { state: 'IN', city: 'Indianapolis' },
+  { state: 'TN', city: 'Nashville' },
+  { state: 'AZ', city: 'Phoenix' },
+  { state: 'AZ', city: 'Tucson' },
+  { state: 'FL', city: 'Jacksonville' },
+  { state: 'FL', city: 'Miami' },
 ];
 
 async function ingestAndQueue() {
@@ -65,19 +69,31 @@ async function ingestAndQueue() {
       });
       if (fmcsa) {
         await prisma.lead.update({ where: { id: lead.id }, data: fmcsa });
+        Object.assign(lead, fmcsa);
         console.log(`🛡️ FMCSA enriched: ${lead.company || lead.name} DOT#${fmcsa.dotNumber} ${fmcsa.authorityStatus || ''}`.trim());
       }
     } catch (err) {
       console.warn(`⚠️ FMCSA enrichment failed for lead ${lead.id}: ${err.message}`);
     }
     
+    // Phase 2 — score, tier, prioritize
+    const intel = runIntelligence(lead);
+    await prisma.lead.update({ where: { id: lead.id }, data: intel.updates });
+    console.log(summarize(lead, intel));
+
+    if (intel.queue.skip) {
+      await prisma.lead.update({ where: { id: lead.id }, data: { status: 'nurture' } });
+      continue;
+    }
+
     // Calculate call time
     const delay = isBusinessHours(lead.state) 
       ? 5000 
       : getNextBusinessTime(lead.state) - Date.now();
     
     await callQueue.add('make-call', { leadId: lead.id }, {
-      delay: Math.max(delay, 0)
+      delay: Math.max(delay, 0),
+      priority: intel.queue.bullPriority
     });
     
     queued++;
