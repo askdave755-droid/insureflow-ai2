@@ -11,7 +11,18 @@ require('./workers/callWorker');
 const app = express();
 
 // Security
-app.use(helmet());
+// NOTE: script-src allows 'unsafe-inline' because the Agency OS dashboard
+// (public/dashboard.html) is a single self-contained page with an inline
+// script — helmet's default CSP was blocking it (dead buttons). All other
+// helmet protections unchanged.
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+      'script-src': ["'self'", "'unsafe-inline'"]
+    }
+  }
+}));
 app.use(rateLimit({
   windowMs: 1 * 60 * 1000,
   max: 100,
