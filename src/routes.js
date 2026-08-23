@@ -8,8 +8,35 @@ const { handleVapiWebhook } = require('./workers/callWorker');
 const { sendEmailBrevo } = require('./lib/messaging');
 const { enrichWithFMCSA } = require('./sources/fmcsa');
 const config = require('./config');
+const { requireAdminKey, verifyVapiWebhook, verifyPhantomWebhook, actorFromRequest } = require('./lib/auth');
+const { auditMiddleware, audit } = require('./lib/audit');
+const { checkContactPermission, addToDnc, recordConsent } = require('./lib/compliance');
 
 const router = express.Router();
+router.use(auditMiddleware());
+
+// Gate every outreach queueing decision through the compliance engine.
+// Returns { queued, delay, lead } — handles hold (schedule at retryAt) and
+// blocked (compliance_hold, no queue) states.
+async function complianceGateAndQueue(lead, actor) {
+  const check = await checkContactPermission(lead, 'call', actor);
+  if (check.status === 'blocked') {
+    await prisma.lead.update({ where: { id: lead.id }, data: { status: 'compliance_hold' } });
+    console.log(`🚫 Compliance BLOCKED lead ${lead.id}: ${check.reasons.join('; ')}`);
+    return { queued: false, blocked: true, reasons: check.reasons };
+  }
+  if (check.status === 'hold') {
+    const retryAt = check.retryAt ? check.retryAt.getTime() : getNextBusinessTime(lead.state);
+    const delay = Math.max(retryAt - Date.now(), 60000);
+    await prisma.lead.update({ where: { id: lead.id }, data: { status: 'scheduled', scheduledCallAt: new Date(retryAt) } });
+    await callQueue.add('make-call', { leadId: lead.id }, { delay });
+    console.log(`⏸️ Compliance HOLD lead ${lead.id} — retry scheduled ${new Date(retryAt).toISOString()}`);
+    return { queued: true, held: true, delay, reasons: check.reasons };
+  }
+  const delay = 5000;
+  await callQueue.add('make-call', { leadId: lead.id }, { delay });
+  return { queued: true, delay };
+}
 
 // ─── HEALTH ───
 router.get('/health', async (req, res) => {
@@ -22,7 +49,7 @@ router.get('/health', async (req, res) => {
 });
 
 // ─── TEST EMAIL (Brevo smoke test — browser friendly) ───
-router.get('/test-email', async (req, res) => {
+router.get('/test-email', requireAdminKey, async (req, res) => {
   try {
     if (!config.BREVO_API_KEY) {
       return res.status(500).json({ sent: false, error: 'BREVO_API_KEY is not set in config/env' });
@@ -98,15 +125,14 @@ router.post('/api/leads', async (req, res) => {
     }
   });
   
-  // Queue the call
-  const delay = isBusinessHours(data.state) ? 5000 : getNextBusinessTime(data.state) - Date.now();
-  await callQueue.add('make-call', { leadId: lead.id }, { delay: Math.max(delay, 0) });
-  
-  res.json({ success: true, lead, queued: true });
+  const gate = await complianceGateAndQueue(lead, actorFromRequest(req, 'api'));
+  await req.audit({ actor: actorFromRequest(req, 'api'), action: 'create', entityType: 'Lead', entityId: lead.id, after: { name: lead.name, phone: lead.phone, state: lead.state, source: lead.source }, metadata: { gate } });
+
+  res.json({ success: true, lead, ...gate });
 });
 
 // ─── BROWSER-FRIENDLY TEST CALL ───
-router.get('/test-call/:phone', async (req, res) => {
+router.get('/test-call/:phone', requireAdminKey, async (req, res) => {
   try {
     const phone = formatPhoneE164(req.params.phone);
     if (!phone) return res.status(400).json({ error: 'Invalid phone number' });
@@ -157,7 +183,7 @@ router.get('/api/leads', async (req, res) => {
 });
 
 // ─── VAPI WEBHOOK ───
-router.post('/webhook/vapi/done', async (req, res) => {
+router.post('/webhook/vapi/done', verifyVapiWebhook, async (req, res) => {
   try {
     const result = await handleVapiWebhook(req.body);
     res.json({ received: true, ...result });
@@ -272,7 +298,7 @@ function extractResultObject(data) {
   return null;
 }
 
-router.post('/webhook/phantom', async (req, res) => {
+router.post('/webhook/phantom', verifyPhantomWebhook, async (req, res) => {
   try {
     console.log('👻 Phantom webhook received:', JSON.stringify(Object.keys(req.body || {})), JSON.stringify(req.body).slice(0, 500));
 
@@ -372,8 +398,8 @@ router.post('/webhook/phantom', async (req, res) => {
         console.warn(`⚠️ FMCSA enrichment failed for lead ${lead.id}: ${err.message}`);
       }
 
-      const delay = isBusinessHours(lead.state) ? 5000 : getNextBusinessTime(lead.state) - Date.now();
-      await callQueue.add('make-call', { leadId: lead.id }, { delay: Math.max(delay, 0) });
+      const gate = await complianceGateAndQueue(lead, 'webhook:phantom');
+      if (gate.blocked) { skipped++; continue; }
       queued++;
     }
 
@@ -386,17 +412,17 @@ router.post('/webhook/phantom', async (req, res) => {
 });
 
 // ─── ADMIN: PAUSE / RESUME ───
-router.get('/admin/pause', (req, res) => {
+router.get('/admin/pause', requireAdminKey, (req, res) => {
   callQueue.pause();
   res.json({ status: 'paused', message: 'Call queue paused' });
 });
 
-router.get('/admin/resume', (req, res) => {
+router.get('/admin/resume', requireAdminKey, (req, res) => {
   callQueue.resume();
   res.json({ status: 'active', message: 'Call queue resumed' });
 });
 
-router.get('/admin/status', async (req, res) => {
+router.get('/admin/status', requireAdminKey, async (req, res) => {
   // Never hang: if Redis/Bull is unresponsive, fall back after 5s.
   let counts;
   try {
@@ -425,7 +451,7 @@ router.get('/admin/status', async (req, res) => {
 });
 
 // ─── COST DASHBOARD ───
-router.get('/admin/costs', async (req, res) => {
+router.get('/admin/costs', requireAdminKey, async (req, res) => {
   const costs = await prisma.cost.groupBy({
     by: ['type'],
     _sum: { amount: true },
@@ -435,32 +461,14 @@ router.get('/admin/costs', async (req, res) => {
   res.json(costs);
 });
 
-// ─── ADMIN KEY GUARD ───
-// Diagnostic-friendly 401: reveals WHETHER the env key is loaded and its
-// length (never the value), so config problems are debuggable without logs.
-function requireAdminKey(req, res) {
-  const provided = req.headers['x-admin-key'];
-  if (!config.ADMIN_API_KEY || provided !== config.ADMIN_API_KEY) {
-    res.status(401).json({
-      error: 'Unauthorized',
-      keyConfigured: !!config.ADMIN_API_KEY,
-      expectedLength: config.ADMIN_API_KEY ? String(config.ADMIN_API_KEY).length : 0,
-      providedLength: provided ? String(provided).length : 0
-    });
-    return false;
-  }
-  return true;
-}
-
 // ─── NUCLEAR RESET ───
-router.post('/admin/nuclear-reset', async (req, res) => {
-  if (!requireAdminKey(req, res)) return;
-  
+router.post('/admin/nuclear-reset', requireAdminKey, async (req, res) => {
   await prisma.callLog.deleteMany();
   await prisma.cost.deleteMany();
   await prisma.lead.deleteMany();
   await prisma.dailyStat.deleteMany();
-  
+
+  await req.audit({ actor: 'admin', action: 'nuclear_reset', entityType: 'System', entityId: 'all' });
   res.json({ reset: true, message: 'All data cleared' });
 });
 
@@ -468,9 +476,7 @@ router.post('/admin/nuclear-reset', async (req, res) => {
 // Deletes ONLY junk: test leads (manual_test + webhook self-tests) and
 // national-carrier/chain leads. Real scraped leads are kept. Requires
 // x-admin-key header like nuclear-reset.
-router.post('/admin/cleanup', async (req, res) => {
-  if (!requireAdminKey(req, res)) return;
-
+router.post('/admin/cleanup', requireAdminKey, async (req, res) => {
   try {
     // 1) Test leads by source
     const byTestSource = await prisma.lead.deleteMany({
@@ -519,6 +525,50 @@ router.post('/admin/cleanup', async (req, res) => {
     console.error('❌ Cleanup failed:', error);
     res.status(500).json({ cleaned: false, error: error.message });
   }
+});
+
+// ─── COMPLIANCE MANAGEMENT (admin) ───
+// Add to internal DNC: { phone } or { email }, optional reason/source
+router.post('/admin/dnc', requireAdminKey, async (req, res) => {
+  const { phone, email, reason, source } = req.body || {};
+  if (!phone && !email) return res.status(400).json({ error: 'phone or email required' });
+  const entry = await addToDnc({ phone: phone ? formatPhoneE164(phone) : null, email, reason, source }, 'admin');
+  res.json({ success: true, entry });
+});
+
+router.get('/admin/dnc', requireAdminKey, async (req, res) => {
+  const entries = await prisma.dncEntry.findMany({ orderBy: { createdAt: 'desc' }, take: 500 });
+  res.json(entries);
+});
+
+router.delete('/admin/dnc/:id', requireAdminKey, async (req, res) => {
+  const before = await prisma.dncEntry.findUnique({ where: { id: req.params.id } });
+  if (!before) return res.status(404).json({ error: 'Not found' });
+  await prisma.dncEntry.delete({ where: { id: req.params.id } });
+  await req.audit({ actor: 'admin', action: 'dnc_removed', entityType: 'DncEntry', entityId: req.params.id, before });
+  res.json({ removed: true });
+});
+
+// Record consent (e.g. verbal opt-in captured on a call)
+router.post('/api/consent', requireAdminKey, async (req, res) => {
+  const { leadId, phone, channel = 'sms', granted = true, consentType, proofText, source } = req.body || {};
+  if (!phone && !leadId) return res.status(400).json({ error: 'leadId or phone required' });
+  const event = await recordConsent({ leadId, phone: phone ? formatPhoneE164(phone) : null, channel, granted, consentType, proofText, source }, 'admin');
+  // Consent may release a held lead
+  if (granted && leadId) {
+    await prisma.lead.updateMany({ where: { id: leadId, complianceStatus: 'hold' }, data: { complianceStatus: 'clear', complianceNotes: 'Consent recorded — hold released' } });
+  }
+  res.json({ success: true, event });
+});
+
+// ─── AUDIT TRAIL VIEWER (admin) ───
+router.get('/admin/audit', requireAdminKey, async (req, res) => {
+  const { entityType, entityId, limit = 100 } = req.query;
+  const where = {};
+  if (entityType) where.entityType = entityType;
+  if (entityId) where.entityId = entityId;
+  const logs = await prisma.auditLog.findMany({ where, orderBy: { createdAt: 'desc' }, take: parseInt(limit) });
+  res.json(logs);
 });
 
 module.exports = router;
