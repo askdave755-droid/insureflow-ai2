@@ -1,3 +1,4 @@
+const path = require('path');
 const express = require('express');
 const { z } = require('zod');
 const axios = require('axios');
@@ -13,6 +14,7 @@ const { assertTransition } = require('./lib/pipeline');
 const { createSubmissions, submitSubmission } = require('./lib/submissions');
 const { recordQuote, presentQuote, acceptQuote, declineQuote } = require('./lib/quotes');
 const { matchCarriers } = require('./lib/carriers');
+const { getDashboard } = require('./lib/analytics');
 const config = require('./config');
 const { requireAdminKey, verifyVapiWebhook, verifyPhantomWebhook, actorFromRequest } = require('./lib/auth');
 const { auditMiddleware, audit } = require('./lib/audit');
@@ -475,6 +477,27 @@ router.get('/api/renewals', requireAdminKey, async (req, res) => {
     }
   });
   res.json(renewals);
+});
+
+// ═══════════════════════════════════════════════════════
+// PHASE 5 — AGENCY OS
+// ═══════════════════════════════════════════════════════
+
+// Dashboard data (JSON) — everything the Agency OS page needs in one call
+router.get('/api/dashboard', requireAdminKey, async (req, res) => {
+  try {
+    const data = await getDashboard();
+    res.json(data);
+  } catch (error) {
+    console.error('❌ Dashboard failed:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// The Agency OS page itself — open /dashboard in any browser (phone-friendly),
+// enter the admin key once, done.
+router.get('/dashboard', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'public', 'dashboard.html'));
 });
 
 // ─── VAPI WEBHOOK ───
