@@ -1,8 +1,9 @@
 const { callQueue } = require('../queue');
 const prisma = require('../db');
 const { makeCall } = require('../lib/vapi');
-const { isBusinessHours, isQualified } = require('../lib/validate');
-const { handleQualifiedLead } = require('../lib/messaging');
+const { isBusinessHours, getNextBusinessTime } = require('../lib/validate');
+const { analyzeCall } = require('../lib/qualify');
+const { handleCallOutcome } = require('../lib/followup');
 
 callQueue.process('make-call', 3, async (job) => {
   const { leadId, force } = job.data;
@@ -15,7 +16,6 @@ callQueue.process('make-call', 3, async (job) => {
     console.log('⚡ Force mode: skipping business hours check');
   } else if (!isBusinessHours(lead.state)) {
     console.log(`⏳ Rescheduling ${leadId} - outside business hours`);
-    const { getNextBusinessTime } = require('../lib/validate');
     const nextTime = getNextBusinessTime(lead.state);
     
     await prisma.lead.update({
@@ -28,10 +28,10 @@ callQueue.process('make-call', 3, async (job) => {
     return { rescheduled: true, nextCall: nextTime };
   }
   
-  // Update status
+  // Update status + count the attempt (Phase 3 — retry engine uses this)
   await prisma.lead.update({
     where: { id: leadId },
-    data: { status: 'calling', calledAt: new Date() }
+    data: { status: 'calling', calledAt: new Date(), callAttempts: { increment: 1 } }
   });
   
   // Make the call
@@ -80,6 +80,9 @@ callQueue.process('make-call', 3, async (job) => {
 console.log('👷 Call worker registered on queue: vapi-calls (job: make-call, concurrency: 3)');
 
 // ─── WEBHOOK HANDLER (called from routes) ───
+// Phase 3: every end-of-call report runs through call intelligence
+// (disposition + extraction) and the follow-up engine (conversion,
+// retries, DNC, tasks).
 async function handleVapiWebhook(webhookData) {
   const message = webhookData.message || {};
   console.log('📬 Vapi webhook:', message?.type, message?.call?.id);
@@ -105,7 +108,10 @@ async function handleVapiWebhook(webhookData) {
   }
   const successEvaluation = message.analysis?.successEvaluation;
 
-  const callLog = await prisma.callLog.findFirst({
+  // Phase 3 — call intelligence
+  const analysis = analyzeCall({ transcript, summary, successEvaluation, duration });
+
+  let callLog = await prisma.callLog.findFirst({
     where: { callId },
     include: { lead: true }
   });
@@ -113,78 +119,64 @@ async function handleVapiWebhook(webhookData) {
   if (!callLog) {
     console.error('❌ Call log not found for Vapi call ID:', callId);
     // Fallback: maybe the lead has this vapiCallId but no callLog row
-    const lead = await prisma.lead.findFirst({ where: { vapiCallId: callId } });
-    if (lead) {
-      console.log(`⚠️ Found lead ${lead.id} by vapiCallId but no CallLog row — creating one`);
-      const qualified = isQualified(transcript) ||
-                        (successEvaluation && String(successEvaluation).toLowerCase().includes('success')) ||
-                        false;
-      const newLog = await prisma.callLog.create({
-        data: {
-          leadId: lead.id,
-          callId,
-          status: message.call?.status || 'ended',
-          duration,
-          transcript,
-          summary,
-          qualified,
-          recordingUrl
-        }
-      });
-      await prisma.lead.update({
-        where: { id: lead.id },
-        data: {
-          status: qualified ? 'qualified' : 'not_interested',
-          qualified,
-          transcript,
-          qualifiedAt: qualified ? new Date() : null
-        }
-      });
-      if (qualified) {
-        console.log(`🔥 QUALIFIED: ${lead.name} (${lead.company})`);
-        await handleQualifiedLead(lead);
+    const orphanLead = await prisma.lead.findFirst({ where: { vapiCallId: callId } });
+    if (!orphanLead) {
+      console.error('❌ No lead found with vapiCallId either:', callId);
+      return { error: 'callLog not found', callId };
+    }
+    console.log(`⚠️ Found lead ${orphanLead.id} by vapiCallId but no CallLog row — creating one`);
+    const newLog = await prisma.callLog.create({
+      data: {
+        leadId: orphanLead.id,
+        callId,
+        status: message.call?.status || 'ended',
+        duration,
+        transcript,
+        summary,
+        qualified: analysis.qualified,
+        disposition: analysis.disposition,
+        recordingUrl
       }
-      return { qualified, leadId: lead.id, callLogCreated: newLog.id };
-    }
-    console.error('❌ No lead found with vapiCallId either:', callId);
-    return { error: 'callLog not found', callId };
+    });
+    callLog = { ...newLog, lead: orphanLead };
+  } else {
+    // Update call log with final outcome
+    await prisma.callLog.update({
+      where: { id: callLog.id },
+      data: {
+        status: message.call?.status || 'ended',
+        duration,
+        transcript,
+        summary,
+        qualified: analysis.qualified,
+        disposition: analysis.disposition,
+        recordingUrl
+      }
+    });
   }
 
-  const qualified = isQualified(transcript) ||
-                    (successEvaluation && String(successEvaluation).toLowerCase().includes('success')) ||
-                    false;
-
-  // Update call log
-  await prisma.callLog.update({
-    where: { id: callLog.id },
-    data: {
-      status: message.call?.status || 'ended',
-      duration,
-      transcript,
-      summary,
-      qualified,
-      recordingUrl
-    }
-  });
-
-  // Update lead
-  await prisma.lead.update({
-    where: { id: callLog.leadId },
-    data: {
-      status: qualified ? 'qualified' : 'not_interested',
-      qualified,
-      transcript,
-      qualifiedAt: qualified ? new Date() : null
-    }
-  });
-
-  // If qualified, trigger followups
-  if (qualified) {
-    console.log(`🔥 QUALIFIED: ${callLog.lead.name} (${callLog.lead.company})`);
-    await handleQualifiedLead(callLog.lead);
+  // Fresh lead (callAttempts etc. may have changed since the job ran)
+  const lead = await prisma.lead.findUnique({ where: { id: callLog.leadId } });
+  if (!lead) {
+    console.error('❌ Lead vanished between call and webhook:', callLog.leadId);
+    return { error: 'lead not found', leadId: callLog.leadId };
   }
 
-  return { qualified, leadId: callLog.leadId };
+  // Phase 3 — follow-up engine: conversion, retries, DNC, tasks, messaging
+  const outcome = await handleCallOutcome(lead, analysis, 'webhook:vapi');
+
+  if (outcome.qualified) {
+    console.log(`🔥 QUALIFIED (${outcome.disposition}): ${lead.name} (${lead.company})`);
+  } else {
+    console.log(`📞 Outcome: ${lead.name} → ${outcome.disposition} (status: ${outcome.updates.status})`);
+  }
+
+  return {
+    qualified: outcome.qualified,
+    disposition: outcome.disposition,
+    leadId: lead.id,
+    extracted: analysis.intel
+  };
 }
 
 module.exports = { handleVapiWebhook };
