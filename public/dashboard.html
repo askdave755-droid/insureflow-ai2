@@ -36,14 +36,13 @@
   .b-stage { background: var(--card2); color: var(--dim); }
   .done-btn { background: var(--good); color: #04120a; border: 0; border-radius: 8px; padding: 8px 14px; font-weight: 700; font-size: 13px; }
   a.call { color: var(--accent); text-decoration: none; font-size: 13px; }
-  .stage-col { margin-bottom: 10px; }
-  .stage-head { font-size: 12px; color: var(--dim); margin: 6px 0; font-weight: 600; }
   .empty { color: var(--dim); font-size: 13px; padding: 10px 4px; }
   #keygate { position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; z-index: 10; }
   #keygate input { width: 100%; max-width: 340px; padding: 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--text); font-size: 16px; margin: 12px 0; }
   #keygate button { background: var(--accent); color: #1a1a1a; border: 0; border-radius: 10px; padding: 14px 32px; font-size: 16px; font-weight: 700; }
   .hidden { display: none; }
-  .err { color: var(--hot); font-size: 13px; margin-top: 8px; }
+  .err { color: var(--hot); font-size: 13px; margin-top: 8px; max-width: 340px; text-align: center; }
+  #errbar { background: rgba(239,68,68,.12); border: 1px solid var(--hot); color: var(--hot); margin: 10px 12px; padding: 10px 12px; border-radius: 10px; font-size: 13px; white-space: pre-wrap; }
 </style>
 </head>
 <body>
@@ -64,6 +63,8 @@
   <button class="refresh" onclick="load()">↻ Refresh</button>
 </header>
 
+<div id="errbar" class="hidden"></div>
+
 <section id="revenue"></section>
 <section id="tasks"></section>
 <section id="pipeline"></section>
@@ -78,31 +79,41 @@ function saveKey() {
   KEY = document.getElementById('keyinput').value.trim();
   if (!KEY) return;
   localStorage.setItem('if_admin_key', KEY);
+  document.getElementById('keyerr').textContent = 'Checking…';
   load();
+}
+
+function showErr(msg) {
+  const bar = document.getElementById('errbar');
+  bar.textContent = msg;
+  bar.classList.remove('hidden');
+  document.getElementById('hdr').classList.remove('hidden');
+  document.getElementById('keygate').classList.add('hidden');
 }
 
 async function api(path) {
   const r = await fetch(path, { headers: { 'x-admin-key': KEY } });
-  if (r.status === 401) throw new Error('401');
-  return r.json();
+  const body = await r.json().catch(() => ({}));
+  if (r.status === 401) {
+    const diag = body.expectedLength
+      ? ` (your key: ${body.providedLength} chars, expected: ${body.expectedLength} chars)`
+      : '';
+    throw new Error('401' + diag);
+  }
+  if (!r.ok) throw new Error('Server error ' + r.status + ': ' + (body.error || JSON.stringify(body)).slice(0, 300));
+  return body;
 }
 
 const money = n => '$' + Math.round(n || 0).toLocaleString();
 const dstr = d => d ? new Date(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '—';
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-function bandBadge(b) {
-  if (b === 'HOT') return '<span class="badge b-hot">HOT</span>';
-  if (b === 'GOOD') return '<span class="badge b-good">GOOD</span>';
-  if (b) return '<span class="badge b-nurture">' + esc(b) + '</span>';
-  return '';
-}
-
 async function load() {
   try {
     const d = await api('/api/dashboard');
     document.getElementById('keygate').classList.add('hidden');
     document.getElementById('hdr').classList.remove('hidden');
+    document.getElementById('errbar').classList.add('hidden');
     document.getElementById('timestamp').textContent = 'Updated ' + new Date().toLocaleTimeString();
 
     // Revenue cards
@@ -182,12 +193,13 @@ async function load() {
         <br>Cost (30d): $${d.costs.last30d}
       </div>`;
   } catch (e) {
-    if (e.message === '401') {
+    if (String(e.message).startsWith('401')) {
       document.getElementById('keygate').classList.remove('hidden');
-      document.getElementById('keyerr').textContent = 'Wrong key — try again.';
+      document.getElementById('hdr').classList.add('hidden');
+      document.getElementById('keyerr').textContent = 'Wrong key' + e.message.slice(3) + ' — check Railway → Variables → ADMIN_API_KEY and paste the exact value.';
       localStorage.removeItem('if_admin_key');
     } else {
-      console.error(e);
+      showErr('Dashboard load failed: ' + e.message + '\n\nTap ↻ Refresh to retry. If it persists, screenshot this and send it to me.');
     }
   }
 }
