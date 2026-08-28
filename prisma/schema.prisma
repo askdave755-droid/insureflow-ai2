@@ -135,12 +135,17 @@ model Lead {
   callAttempts     Int              @default(0) @map("call_attempts")
   lastDisposition  String?          @map("last_disposition") // booked / callback / no_answer / dnc ...
 
+  // Phase 1 tenancy — nullable clientId keeps legacy null-client behavior
+  clientId         String?          @map("client_id")
+
   account      Account?       @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  client       Client?        @relation(fields: [clientId], references: [id], onDelete: SetNull)
   callLogs     CallLog[]
   costs        Cost[]
   opportunities Opportunity[]
   tasks        Task[]
 
+  @@index([clientId, status])
   @@index([state, status])
   @@index([source, createdAt])
   @@index([scheduledCallAt])
@@ -180,9 +185,14 @@ model Cost {
   description String?
   createdAt   DateTime @default(now()) @map("created_at")
 
-  lead Lead? @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  // Phase 1 tenancy
+  clientId    String?  @map("client_id")
+
+  lead   Lead?   @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  client Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
 
   @@index([createdAt])
+  @@index([clientId, createdAt])
   @@map("costs")
 }
 
@@ -242,12 +252,17 @@ model Account {
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
 
+  // Phase 1 tenancy
+  clientId  String?  @map("client_id")
+
+  client        Client?       @relation(fields: [clientId], references: [id], onDelete: SetNull)
   leads         Lead[]
   opportunities Opportunity[]
   policies      Policy[]
   renewals      Renewal[]
   tasks         Task[]
 
+  @@index([clientId])
   @@index([state])
   @@index([dotNumber])
   @@index([mcNumber])
@@ -276,11 +291,16 @@ model Opportunity {
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 
+  // Phase 1 tenancy
+  clientId        String?  @map("client_id")
+
   account     Account      @relation(fields: [accountId], references: [id], onDelete: Cascade)
   lead        Lead?        @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  client      Client?      @relation(fields: [clientId], references: [id], onDelete: SetNull)
   submissions Submission[]
   tasks       Task[]
 
+  @@index([clientId, stage])
   @@index([accountId, stage])
   @@index([stage, priority])
   @@index([xDate])
@@ -305,10 +325,15 @@ model Task {
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
 
+  // Phase 1 tenancy
+  clientId      String?  @map("client_id")
+
   lead        Lead?        @relation(fields: [leadId], references: [id], onDelete: Cascade)
   opportunity Opportunity? @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
   account     Account?     @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  client      Client?      @relation(fields: [clientId], references: [id], onDelete: SetNull)
 
+  @@index([clientId, status])
   @@index([status, dueAt])
   @@index([leadId])
   @@index([opportunityId])
@@ -448,8 +473,15 @@ model DncEntry {
   source    String   @default("manual") // manual / call_opt_out / sms_stop / vendor
   createdAt DateTime @default(now()) @map("created_at")
 
+  // Phase 1 tenancy
+  clientId  String?  @map("client_id")
+
+  client Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
   @@index([phone])
   @@index([email])
+  @@index([clientId, phone])
+  @@index([clientId, email])
   @@map("dnc_entries")
 }
 
@@ -464,6 +496,72 @@ model ConsentEvent {
   source      String?
   capturedAt  DateTime @default(now()) @map("captured_at")
 
+  // Phase 1 tenancy
+  clientId    String?  @map("client_id")
+
+  client Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
   @@index([phone, channel])
+  @@index([clientId, phone])
   @@map("consent_events")
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// PHASE 1 TENANCY — thin clientId layer (insurance-agent clients)
+// Null clientId = legacy single-agency behavior (existing env config).
+// ═══════════════════════════════════════════════════════════════════
+model Client {
+  id                String   @id @default(uuid())
+  name              String
+  slug              String   @unique
+  licensedStates    String[] @map("licensed_states")
+  vapiAssistantId   String?  @map("vapi_assistant_id")
+  vapiPhoneNumberId String?  @map("vapi_phone_number_id")
+  calendlyLink      String?  @map("calendly_link")
+  brevoSenderName   String?  @map("brevo_sender_name")
+  brevoSenderEmail  String?  @map("brevo_sender_email")
+  brandingJson      Json?    @map("branding_json")
+  active            Boolean  @default(true)
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  leads           Lead[]
+  accounts        Account[]
+  opportunities   Opportunity[]
+  tasks           Task[]
+  costs           Cost[]
+  dncEntries      DncEntry[]
+  consentEvents   ConsentEvent[]
+  agencyProspects AgencyProspect[]
+
+  @@map("clients")
+}
+
+// ─── AGENCY PROSPECT (Instantly AI — acquiring insurance-agent clients,
+//     NOT insurance prospects. Fed by Instantly webhooks/polling.) ───
+model AgencyProspect {
+  id                  String   @id @default(uuid())
+  email               String   @unique
+  firstName           String?  @map("first_name")
+  lastName            String?  @map("last_name")
+  agencyName          String?  @map("agency_name")
+  phone               String?
+  state               String?
+  // Phase 1 string status: new / contacted / replied / qualified / booked /
+  // client / unsubscribed / bounced (validated in code, not enum)
+  status              String   @default("new")
+  instantlyLeadId     String?  @map("instantly_lead_id")
+  instantlyCampaignId String?  @map("instantly_campaign_id")
+  lastEvent           String?  @map("last_event")
+  notes               String?  @db.Text
+  clientId            String?  @map("client_id")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  client Client? @relation(fields: [clientId], references: [id], onDelete: SetNull)
+
+  @@index([status, updatedAt])
+  @@index([clientId])
+  @@index([instantlyLeadId])
+  @@map("agency_prospects")
 }
