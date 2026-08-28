@@ -452,3 +452,4 @@ ALTER TABLE "renewals" ADD CONSTRAINT "renewals_policy_id_fkey" FOREIGN KEY ("po
 
 -- AddForeignKey
 ALTER TABLE "renewals" ADD CONSTRAINT "renewals_account_id_fkey" FOREIGN KEY ("account_id") REFERENCES "accounts"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
