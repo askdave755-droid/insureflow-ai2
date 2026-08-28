@@ -130,3 +130,4 @@ ALTER TABLE "consent_events" ADD CONSTRAINT "consent_events_client_id_fkey" FORE
 
 -- AddForeignKey
 ALTER TABLE "agency_prospects" ADD CONSTRAINT "agency_prospects_client_id_fkey" FOREIGN KEY ("client_id") REFERENCES "clients"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
