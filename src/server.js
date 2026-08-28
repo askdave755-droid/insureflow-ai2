@@ -3,6 +3,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const config = require('./config');
 const routes = require('./routes');
+const clientRoutes = require('./routes-clients');
 const prisma = require('./db');
 const { attachCarrierRoutes } = require('./routes-carrier');
 require('./orchestrator');
@@ -38,6 +39,7 @@ app.use(express.static('public'));
 
 // Routes
 app.use(routes);
+app.use(clientRoutes);
 
 // Carrier routes expect a pg-style pool; shim it over Prisma
 // ($queryRawUnsafe supports $1 positional params used by routes-carrier).

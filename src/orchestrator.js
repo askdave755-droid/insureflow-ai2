@@ -93,7 +93,8 @@ async function ingestAndQueue() {
     
     await callQueue.add('make-call', { leadId: lead.id }, {
       delay: Math.max(delay, 0),
-      priority: intel.queue.bullPriority
+      priority: intel.queue.bullPriority,
+      jobId: `call:${lead.id}`
     });
     
     queued++;

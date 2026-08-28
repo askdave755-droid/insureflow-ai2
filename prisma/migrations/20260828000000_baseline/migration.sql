@@ -1,3 +1,19 @@
+-- ─────────────────────────────────────────────────────────────────────────────
+-- BASELINE MIGRATION (release/backend-hardening-phase1)
+-- Represents the pre-existing schema (transportation core + compliance),
+-- generated locally with:
+--   npx prisma migrate diff --from-empty --to-schema-datamodel <old schema> --script
+--
+-- DEPLOY NOTE: the existing production DB was created via `prisma db push`
+-- (no migration history). Before the new startCommand runs:
+--   1. BACK UP the production database.
+--   2. Mark this baseline as applied WITHOUT executing it:
+--        npx prisma migrate resolve --applied 20260828000000_baseline
+--   3. `npx prisma migrate deploy` then applies only
+--      20260828000100_phase1_tenancy_instantly (purely additive).
+-- Fresh databases apply both migrations normally.
+-- ─────────────────────────────────────────────────────────────────────────────
+
 -- CreateEnum
 CREATE TYPE "LeadStatus" AS ENUM ('pending', 'scheduled', 'calling', 'called', 'qualified', 'converted', 'nurture', 'compliance_hold', 'rejected_timezone', 'closed');
 
@@ -19,10 +35,102 @@ CREATE TYPE "PolicyStatus" AS ENUM ('ACTIVE', 'PENDING_CANCEL', 'CANCELLED', 'EX
 -- CreateEnum
 CREATE TYPE "RenewalStage" AS ENUM ('NOT_STARTED', 'CONTACTED', 'RE_MARKETING', 'QUOTED', 'PROPOSAL', 'BOUND', 'LOST');
 
--- AlterTable
-ALTER TABLE "leads" ADD COLUMN     "account_id" TEXT,
-ADD COLUMN     "compliance_notes" TEXT,
-ADD COLUMN     "compliance_status" TEXT NOT NULL DEFAULT 'unchecked';
+-- CreateTable
+CREATE TABLE "leads" (
+    "id" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "phone" TEXT NOT NULL,
+    "email" TEXT,
+    "company" TEXT,
+    "title" TEXT,
+    "state" TEXT NOT NULL,
+    "city" TEXT,
+    "county" TEXT,
+    "insurance_type" TEXT NOT NULL DEFAULT 'commercial_auto',
+    "source" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'pending',
+    "qualified" BOOLEAN NOT NULL DEFAULT false,
+    "transcript" TEXT,
+    "vapi_call_id" TEXT,
+    "vapi_cost" DECIMAL(10,4),
+    "dot_number" TEXT,
+    "mc_number" TEXT,
+    "vehicle_count" INTEGER,
+    "driver_count" INTEGER,
+    "authority_status" TEXT,
+    "x_date" TIMESTAMP(3),
+    "current_carrier" TEXT,
+    "workers_comp_mod" DECIMAL(4,2),
+    "industry" TEXT,
+    "revenue" INTEGER,
+    "employee_count" INTEGER,
+    "naics_code" TEXT,
+    "scheduled_call_at" TIMESTAMP(3),
+    "called_at" TIMESTAMP(3),
+    "qualified_at" TIMESTAMP(3),
+    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMP(3) NOT NULL,
+    "compliance_status" TEXT NOT NULL DEFAULT 'unchecked',
+    "compliance_notes" TEXT,
+    "account_id" TEXT,
+    "risk_score" INTEGER,
+    "opportunity_score" INTEGER,
+    "score_band" TEXT,
+    "xdate_tier" TEXT,
+    "operating_radius" TEXT,
+    "hazmat" BOOLEAN,
+    "interstate" BOOLEAN,
+    "call_attempts" INTEGER NOT NULL DEFAULT 0,
+    "last_disposition" TEXT,
+
+    CONSTRAINT "leads_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "call_logs" (
+    "id" TEXT NOT NULL,
+    "lead_id" TEXT NOT NULL,
+    "call_id" TEXT NOT NULL,
+    "status" TEXT NOT NULL,
+    "duration" INTEGER,
+    "cost" DECIMAL(10,4),
+    "transcript" TEXT,
+    "summary" TEXT,
+    "qualified" BOOLEAN NOT NULL DEFAULT false,
+    "disposition" TEXT,
+    "recording_url" TEXT,
+    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "call_logs_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "costs" (
+    "id" TEXT NOT NULL,
+    "lead_id" TEXT,
+    "type" TEXT NOT NULL,
+    "amount" DECIMAL(10,4) NOT NULL,
+    "description" TEXT,
+    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "costs_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "daily_stats" (
+    "id" TEXT NOT NULL,
+    "date" TIMESTAMP(3) NOT NULL,
+    "leads_ingested" INTEGER NOT NULL DEFAULT 0,
+    "calls_made" INTEGER NOT NULL DEFAULT 0,
+    "qualified" INTEGER NOT NULL DEFAULT 0,
+    "sms_sent" INTEGER NOT NULL DEFAULT 0,
+    "emails_sent" INTEGER NOT NULL DEFAULT 0,
+    "total_cost" DECIMAL(10,4) NOT NULL DEFAULT 0,
+    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "daily_stats_pkey" PRIMARY KEY ("id")
+);
 
 -- CreateTable
 CREATE TABLE "accounts" (
@@ -78,6 +186,25 @@ CREATE TABLE "opportunities" (
     "updated_at" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "opportunities_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "tasks" (
+    "id" TEXT NOT NULL,
+    "lead_id" TEXT,
+    "opportunity_id" TEXT,
+    "account_id" TEXT,
+    "type" TEXT NOT NULL,
+    "title" TEXT NOT NULL,
+    "notes" TEXT,
+    "due_at" TIMESTAMP(3),
+    "status" TEXT NOT NULL DEFAULT 'open',
+    "priority" TEXT NOT NULL DEFAULT 'normal',
+    "completed_at" TIMESTAMP(3),
+    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "tasks_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -192,6 +319,39 @@ CREATE TABLE "consent_events" (
 );
 
 -- CreateIndex
+CREATE INDEX "leads_state_status_idx" ON "leads"("state", "status");
+
+-- CreateIndex
+CREATE INDEX "leads_source_created_at_idx" ON "leads"("source", "created_at");
+
+-- CreateIndex
+CREATE INDEX "leads_scheduled_call_at_idx" ON "leads"("scheduled_call_at");
+
+-- CreateIndex
+CREATE INDEX "leads_status_qualified_idx" ON "leads"("status", "qualified");
+
+-- CreateIndex
+CREATE INDEX "leads_account_id_idx" ON "leads"("account_id");
+
+-- CreateIndex
+CREATE INDEX "leads_score_band_opportunity_score_idx" ON "leads"("score_band", "opportunity_score");
+
+-- CreateIndex
+CREATE INDEX "leads_xdate_tier_idx" ON "leads"("xdate_tier");
+
+-- CreateIndex
+CREATE INDEX "call_logs_lead_id_idx" ON "call_logs"("lead_id");
+
+-- CreateIndex
+CREATE INDEX "call_logs_call_id_idx" ON "call_logs"("call_id");
+
+-- CreateIndex
+CREATE INDEX "costs_created_at_idx" ON "costs"("created_at");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "daily_stats_date_key" ON "daily_stats"("date");
+
+-- CreateIndex
 CREATE INDEX "accounts_state_idx" ON "accounts"("state");
 
 -- CreateIndex
@@ -208,6 +368,15 @@ CREATE INDEX "opportunities_stage_priority_idx" ON "opportunities"("stage", "pri
 
 -- CreateIndex
 CREATE INDEX "opportunities_x_date_idx" ON "opportunities"("x_date");
+
+-- CreateIndex
+CREATE INDEX "tasks_status_due_at_idx" ON "tasks"("status", "due_at");
+
+-- CreateIndex
+CREATE INDEX "tasks_lead_id_idx" ON "tasks"("lead_id");
+
+-- CreateIndex
+CREATE INDEX "tasks_opportunity_id_idx" ON "tasks"("opportunity_id");
 
 -- CreateIndex
 CREATE INDEX "submissions_opportunity_id_status_idx" ON "submissions"("opportunity_id", "status");
@@ -242,17 +411,29 @@ CREATE INDEX "dnc_entries_email_idx" ON "dnc_entries"("email");
 -- CreateIndex
 CREATE INDEX "consent_events_phone_channel_idx" ON "consent_events"("phone", "channel");
 
--- CreateIndex
-CREATE INDEX "leads_account_id_idx" ON "leads"("account_id");
-
 -- AddForeignKey
 ALTER TABLE "leads" ADD CONSTRAINT "leads_account_id_fkey" FOREIGN KEY ("account_id") REFERENCES "accounts"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "call_logs" ADD CONSTRAINT "call_logs_lead_id_fkey" FOREIGN KEY ("lead_id") REFERENCES "leads"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "costs" ADD CONSTRAINT "costs_lead_id_fkey" FOREIGN KEY ("lead_id") REFERENCES "leads"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "opportunities" ADD CONSTRAINT "opportunities_account_id_fkey" FOREIGN KEY ("account_id") REFERENCES "accounts"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "opportunities" ADD CONSTRAINT "opportunities_lead_id_fkey" FOREIGN KEY ("lead_id") REFERENCES "leads"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "tasks" ADD CONSTRAINT "tasks_lead_id_fkey" FOREIGN KEY ("lead_id") REFERENCES "leads"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "tasks" ADD CONSTRAINT "tasks_opportunity_id_fkey" FOREIGN KEY ("opportunity_id") REFERENCES "opportunities"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "tasks" ADD CONSTRAINT "tasks_account_id_fkey" FOREIGN KEY ("account_id") REFERENCES "accounts"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "submissions" ADD CONSTRAINT "submissions_opportunity_id_fkey" FOREIGN KEY ("opportunity_id") REFERENCES "opportunities"("id") ON DELETE CASCADE ON UPDATE CASCADE;
@@ -271,3 +452,4 @@ ALTER TABLE "renewals" ADD CONSTRAINT "renewals_policy_id_fkey" FOREIGN KEY ("po
 
 -- AddForeignKey
 ALTER TABLE "renewals" ADD CONSTRAINT "renewals_account_id_fkey" FOREIGN KEY ("account_id") REFERENCES "accounts"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+

@@ -5,6 +5,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
+    "test": "node scripts/smoke.js",
     "dev": "nodemon src/server.js",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",

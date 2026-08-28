@@ -122,6 +122,85 @@ async function addToDnc({ phone = null, email = null, reason = null, source = 'm
   return entry;
 }
 
+// ─── DIAL-TIME DNC RECHECK (SPEC §6) ────────────────────────────────
+// Runs in the call worker immediately BEFORE makeCall, even if queue-time
+// compliance passed earlier (DNC may have been added while the job sat in
+// Redis). Force mode may skip business hours but NEVER this check.
+// Checks: lead.complianceStatus === 'blocked', and internal DNC by
+// phone/email. A blocked lead is put on compliance_hold + audited and the
+// call is not placed.
+async function recheckDncAtDialTime(lead, actor = 'worker:call') {
+  const reasons = [];
+
+  if ((lead.complianceStatus || '').toLowerCase() === 'blocked') {
+    reasons.push(`Lead complianceStatus=blocked (${lead.complianceNotes || 'no notes'})`);
+  }
+
+  const dnc = await prisma.dncEntry.findFirst({
+    where: {
+      OR: [
+        lead.phone ? { phone: lead.phone } : undefined,
+        lead.email ? { email: lead.email } : undefined
+      ].filter(Boolean)
+    }
+  });
+  if (dnc) {
+    reasons.push(`On internal DNC list (${dnc.source}${dnc.reason ? ': ' + dnc.reason : ''})`);
+  }
+
+  if (!reasons.length) return { blocked: false, reasons: [] };
+
+  try {
+    await prisma.lead.update({
+      where: { id: lead.id },
+      data: {
+        status: 'compliance_hold',
+        complianceStatus: 'blocked',
+        complianceNotes: `[call/dial-time recheck] BLOCKED — ${reasons.join('; ')}`
+      }
+    });
+  } catch (err) {
+    console.warn(`⚠️ dial-time hold write failed for lead ${lead.id}:`, err.message);
+  }
+  await audit({
+    actor,
+    action: 'contact_blocked',
+    entityType: 'Lead',
+    entityId: lead.id,
+    metadata: { channel: 'call', stage: 'dial_time_recheck', reasons }
+  });
+  return { blocked: true, reasons };
+}
+
+// ─── INBOUND SMS OPT-OUT (STOP) ──────────────────────────────────────
+// Applies an inbound SMS opt-out: phone/email goes on the internal DNC
+// (idempotent) and every matching lead is moved to compliance_hold so it
+// can never be called or messaged again while the DNC entry stands.
+async function applySmsOptOut({ phone = null, email = null, reason = 'Inbound SMS opt-out', source = 'sms_stop' }, actor = 'webhook:brevo') {
+  if (!phone && !email) throw new Error('applySmsOptOut requires phone or email');
+  const entry = await addToDnc({ phone, email, reason, source }, actor);
+  const held = await prisma.lead.updateMany({
+    where: {
+      OR: [phone ? { phone } : undefined, email ? { email } : undefined].filter(Boolean),
+      status: { not: 'compliance_hold' }
+    },
+    data: {
+      status: 'compliance_hold',
+      complianceStatus: 'blocked',
+      complianceNotes: `SMS opt-out via ${source} — DNC`
+    }
+  });
+  await audit({
+    actor,
+    action: 'sms_opt_out',
+    entityType: 'DncEntry',
+    entityId: entry.id,
+    after: { phone, email, source },
+    metadata: { leadsHeld: held.count }
+  });
+  return { dncEntry: entry, leadsHeld: held.count };
+}
+
 // Record a consent grant/revocation (e.g. verbal consent captured in a
 // call transcript, or a web form opt-in).
 async function recordConsent({ leadId = null, phone = null, channel, granted, consentType = 'express_verbal', proofText = null, source = null }, actor = 'system') {
@@ -132,4 +211,4 @@ async function recordConsent({ leadId = null, phone = null, channel, granted, co
   return event;
 }
 
-module.exports = { checkContactPermission, addToDnc, recordConsent };
+module.exports = { checkContactPermission, recheckDncAtDialTime, addToDnc, applySmsOptOut, recordConsent };

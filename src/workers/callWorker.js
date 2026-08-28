@@ -4,27 +4,49 @@ const { makeCall } = require('../lib/vapi');
 const { isBusinessHours, getNextBusinessTime } = require('../lib/validate');
 const { analyzeCall } = require('../lib/qualify');
 const { handleCallOutcome } = require('../lib/followup');
+const { recheckDncAtDialTime } = require('../lib/compliance');
 
 callQueue.process('make-call', 3, async (job) => {
   const { leadId, force } = job.data;
-  
+
   const lead = await prisma.lead.findUnique({ where: { id: leadId } });
   if (!lead) throw new Error('Lead not found');
-  
+
+  // SPEC §6 — dial-time DNC/compliance recheck. Runs on EVERY job, even
+  // when queue-time compliance passed earlier (DNC may have been added
+  // while the job sat in Redis) and even in force mode: force may skip
+  // business hours but NEVER DNC. Blocked leads → compliance_hold + audit,
+  // and no call is placed.
+  const recheck = await recheckDncAtDialTime(lead, 'worker:call');
+  if (recheck.blocked) {
+    console.log(`🚫 Dial-time compliance BLOCK for lead ${leadId}: ${recheck.reasons.join('; ')} — no call placed`);
+    return { blocked: true, reasons: recheck.reasons };
+  }
+
   // Double-check business hours (skipped in force mode)
   if (force) {
     console.log('⚡ Force mode: skipping business hours check');
   } else if (!isBusinessHours(lead.state)) {
     console.log(`⏳ Rescheduling ${leadId} - outside business hours`);
     const nextTime = getNextBusinessTime(lead.state);
-    
+
     await prisma.lead.update({
       where: { id: leadId },
       data: { status: 'scheduled', scheduledCallAt: nextTime }
     });
-    
-    // Re-queue for later
-    await callQueue.add('make-call', { leadId }, { delay: nextTime - Date.now() });
+
+    // Re-queue for later. The active job holds jobId `call:${leadId}` —
+    // remove it first so the delayed replacement isn't deduped away.
+    try { await job.remove(); } catch (err) {
+      console.warn(`⚠️ Could not remove active job ${job.id} before reschedule: ${err.message}`);
+    }
+    const requeued = await callQueue.add('make-call', { leadId }, {
+      delay: nextTime - Date.now(),
+      jobId: `call:${leadId}` // Bull dedupe — one pending call job per lead
+    });
+    if (requeued.id === job.id) {
+      console.warn(`⚠️ Reschedule for lead ${leadId} was deduped against its own active job — lead stays 'scheduled' with scheduledCallAt set`);
+    }
     return { rescheduled: true, nextCall: nextTime };
   }
   

@@ -16,25 +16,46 @@ const queueSettings = {
   retryProcessDelay: 2000
 };
 
-const callQueue = new Queue('vapi-calls', config.REDIS_URL, {
+// When REDIS_URL is unset, Bull would connect to 127.0.0.1:6379 by
+// DEFAULT — booting Redis connections on a bare `require` (breaking the
+// no-Redis import smoke and hanging scripts). Instead export a stub that
+// never connects and throws loudly on any use (fail closed, not silent).
+function makeStubQueue(name) {
+  const err = `Bull queue "${name}" unavailable — REDIS_URL is not configured`;
+  console.warn(`⚠️ ${err}. Queue operations will throw until REDIS_URL is set.`);
+  return new Proxy({}, {
+    get(_, prop) {
+      if (prop === 'then') return undefined; // not a thenable
+      if (prop === 'on' || prop === 'once') return () => {}; // event wiring is a no-op
+      return () => { throw new Error(err); };
+    }
+  });
+}
+
+const callQueue = config.REDIS_URL ? new Queue('vapi-calls', config.REDIS_URL, {
   redis: redisOpts,
   settings: queueSettings,
   defaultJobOptions: {
     attempts: 3,
     backoff: { type: 'exponential', delay: 60000 },
-    removeOnComplete: 100,
+    // SPEC §6: every make-call job carries jobId `call:${leadId}` for
+    // dedupe. Completed jobs must free that jobId immediately or all
+    // future retries for the lead would be silently deduped away — so
+    // removeOnComplete is `true`, not a retained count. Call history
+    // lives in CallLog/audit, not in Bull.
+    removeOnComplete: true,
     removeOnFail: 50
   }
-});
+}) : makeStubQueue('vapi-calls');
 
-const enrichQueue = new Queue('lead-enrichment', config.REDIS_URL, {
+const enrichQueue = config.REDIS_URL ? new Queue('lead-enrichment', config.REDIS_URL, {
   redis: redisOpts,
   settings: queueSettings
-});
-const followupQueue = new Queue('followups', config.REDIS_URL, {
+}) : makeStubQueue('lead-enrichment');
+const followupQueue = config.REDIS_URL ? new Queue('followups', config.REDIS_URL, {
   redis: redisOpts,
   settings: queueSettings
-});
+}) : makeStubQueue('followups');
 
 // Connection state logging
 callQueue.on('ready', () => {
