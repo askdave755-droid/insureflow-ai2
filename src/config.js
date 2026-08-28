@@ -74,6 +74,22 @@ module.exports = {
   BREVO_API_KEY: process.env.BREVO_API_KEY,
   EMAIL_FROM: process.env.EMAIL_FROM,
   CALENDLY_LINK: process.env.CALENDLY_LINK,
+  // Shared secret for Brevo inbound webhooks (fail-closed in production).
+  BREVO_WEBHOOK_SECRET: process.env.BREVO_WEBHOOK_SECRET,
+
+  // Phase 1 tenancy — default client for legacy null-clientId rows/requests.
+  DEFAULT_CLIENT_ID: process.env.DEFAULT_CLIENT_ID,
+  DEFAULT_CLIENT_SLUG: process.env.DEFAULT_CLIENT_SLUG,
+
+  // Nuclear reset guard — /admin/nuclear-reset refuses unless exactly 'true'.
+  ALLOW_NUCLEAR_RESET: process.env.ALLOW_NUCLEAR_RESET,
+
+  // Instantly AI — insurance-agent client acquisition ONLY (not prospect dialing).
+  INSTANTLY_API_KEY: process.env.INSTANTLY_API_KEY,
+  INSTANTLY_API_BASE_URL: process.env.INSTANTLY_API_BASE_URL || 'https://api.instantly.ai/api/v1',
+  INSTANTLY_WEBHOOK_SECRET: process.env.INSTANTLY_WEBHOOK_SECRET,
+  // Outbound push to Instantly stays OFF unless explicitly set to 'true'.
+  INSTANTLY_PUSH_ENABLED: process.env.INSTANTLY_PUSH_ENABLED || 'false',
 
   APOLLO_API_KEY: process.env.APOLLO_API_KEY,
   FMCSA_API_KEY: process.env.FMCSA_API_KEY,
