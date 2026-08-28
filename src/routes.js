@@ -6,7 +6,7 @@ const prisma = require('./db');
 const { callQueue } = require('./queue');
 const { formatPhoneE164, isBusinessHours, getNextBusinessTime } = require('./lib/validate');
 const { handleVapiWebhook } = require('./workers/callWorker');
-const { sendEmailBrevo } = require('./lib/messaging');
+const { sendEmailBrevo, handleBrevoInboundSms } = require('./lib/messaging');
 const { enrichWithFMCSA } = require('./sources/fmcsa');
 const { runIntelligence } = require('./lib/intel');
 const { promoteLead } = require('./lib/convert');
@@ -16,7 +16,7 @@ const { recordQuote, presentQuote, acceptQuote, declineQuote } = require('./lib/
 const { matchCarriers } = require('./lib/carriers');
 const { getDashboard } = require('./lib/analytics');
 const config = require('./config');
-const { requireAdminKey, verifyVapiWebhook, verifyPhantomWebhook, actorFromRequest } = require('./lib/auth');
+const { requireAdminKey, verifyVapiWebhook, verifyPhantomWebhook, verifyBrevoWebhook, actorFromRequest } = require('./lib/auth');
 const { auditMiddleware, audit } = require('./lib/audit');
 const { checkContactPermission, addToDnc, recordConsent } = require('./lib/compliance');
 
@@ -45,12 +45,12 @@ async function complianceGateAndQueue(lead, actor, queueOpts = {}) {
     const retryAt = check.retryAt ? check.retryAt.getTime() : getNextBusinessTime(lead.state);
     const delay = Math.max(retryAt - Date.now(), 60000);
     await prisma.lead.update({ where: { id: lead.id }, data: { status: 'scheduled', scheduledCallAt: new Date(retryAt) } });
-    await callQueue.add('make-call', { leadId: lead.id }, { delay, priority });
+    await callQueue.add('make-call', { leadId: lead.id }, { delay, priority, jobId: `call:${lead.id}` });
     console.log(`⏸️ Compliance HOLD lead ${lead.id} — retry scheduled ${new Date(retryAt).toISOString()}`);
     return { queued: true, held: true, delay, reasons: check.reasons };
   }
   const delay = 5000;
-  await callQueue.add('make-call', { leadId: lead.id }, { delay, priority });
+  await callQueue.add('make-call', { leadId: lead.id }, { delay, priority, jobId: `call:${lead.id}` });
   return { queued: true, delay };
 }
 
@@ -110,7 +110,8 @@ router.get('/test-email', requireAdminKey, async (req, res) => {
 });
 
 // ─── ADD SINGLE LEAD ───
-router.post('/api/leads', async (req, res) => {
+// Admin-key protected (SPEC §6): this endpoint ingests PII and triggers calls.
+router.post('/api/leads', requireAdminKey, async (req, res) => {
   const schema = z.object({
     name: z.string().min(2),
     phone: z.string(),
@@ -182,7 +183,7 @@ router.get('/test-call/:phone', requireAdminKey, async (req, res) => {
       }
     });
     
-    await callQueue.add('make-call', force ? { leadId: lead.id, force: true } : { leadId: lead.id }, { delay: 3000 });
+    await callQueue.add('make-call', force ? { leadId: lead.id, force: true } : { leadId: lead.id }, { delay: 3000, jobId: `call:${lead.id}` });
     
     res.json({
       message: `Test call queued for ${phone} (3s delay)${force ? ' [FORCE MODE]' : ''}`,
@@ -196,7 +197,8 @@ router.get('/test-call/:phone', requireAdminKey, async (req, res) => {
 });
 
 // ─── GET LEADS ───
-router.get('/api/leads', async (req, res) => {
+// Admin-key protected (SPEC §6): returns lead PII.
+router.get('/api/leads', requireAdminKey, async (req, res) => {
   const { status, state, limit = 50 } = req.query;
   
   const where = {};
@@ -734,6 +736,21 @@ router.post('/webhook/phantom', verifyPhantomWebhook, async (req, res) => {
   }
 });
 
+// ─── BREVO INBOUND SMS WEBHOOK ───
+// Public at the path level but verified by BREVO_WEBHOOK_SECRET
+// (fail-closed in production). Handles inbound STOP opt-outs → DNC +
+// compliance_hold (see lib/messaging handleBrevoInboundSms contract).
+router.post('/webhook/brevo/inbound', verifyBrevoWebhook, async (req, res) => {
+  try {
+    const result = await handleBrevoInboundSms(req.body, actorFromRequest(req, 'webhook:brevo'));
+    res.json({ received: true, ...result });
+  } catch (error) {
+    console.error('❌ Brevo inbound webhook error:', error);
+    // Still 200 — don't let Brevo retry-storm us
+    res.status(200).json({ received: true, error: error.message });
+  }
+});
+
 // ─── ADMIN: PAUSE / RESUME ───
 router.get('/admin/pause', requireAdminKey, (req, res) => {
   callQueue.pause();
@@ -785,15 +802,52 @@ router.get('/admin/costs', requireAdminKey, async (req, res) => {
 });
 
 // ─── NUCLEAR RESET ───
+// SPEC §6 — triple-gated destructive action:
+//   1. requireAdminKey (x-admin-key header)
+//   2. ALLOW_NUCLEAR_RESET === 'true' in env — otherwise 403 (refuse
+//      unless explicitly enabled)
+//   3. Request body must be { confirm: 'RESET_ALL_DATA' }
+// Scope: deletes ALL pipeline tables (quotes, submissions, renewals,
+// policies, opportunities, accounts) plus leads, call logs, tasks, costs,
+// and daily stats. DNC entries, consent events, and audit logs are ALWAYS
+// preserved — deleting compliance records would let the system re-contact
+// people who opted out.
+// NOTE: reads process.env.ALLOW_NUCLEAR_RESET directly because
+// src/config.js (owned by another track) does not export it yet (SPEC §7).
 router.post('/admin/nuclear-reset', requireAdminKey, async (req, res) => {
-  await prisma.callLog.deleteMany();
+  const allowReset = (config.ALLOW_NUCLEAR_RESET || process.env.ALLOW_NUCLEAR_RESET) === 'true';
+  if (!allowReset) {
+    return res.status(403).json({
+      reset: false,
+      error: 'Nuclear reset is disabled. Set ALLOW_NUCLEAR_RESET=true in env to enable it.',
+      scope: 'When enabled with { confirm: "RESET_ALL_DATA" }: deletes leads, call logs, tasks, costs, daily stats, accounts, opportunities, submissions, quotes, policies, renewals. DNC entries, consent events, and audit logs are always preserved (compliance records).'
+    });
+  }
+  if (req.body?.confirm !== 'RESET_ALL_DATA') {
+    return res.status(400).json({
+      reset: false,
+      error: 'Confirmation required: POST body must be { "confirm": "RESET_ALL_DATA" }'
+    });
+  }
+
+  // Children before parents (FK order).
+  await prisma.renewal.deleteMany();
+  await prisma.policy.deleteMany();
+  await prisma.quote.deleteMany();
+  await prisma.submission.deleteMany();
   await prisma.task.deleteMany();
+  await prisma.opportunity.deleteMany();
+  await prisma.callLog.deleteMany();
   await prisma.cost.deleteMany();
   await prisma.lead.deleteMany();
+  await prisma.account.deleteMany();
   await prisma.dailyStat.deleteMany();
 
   await req.audit({ actor: 'admin', action: 'nuclear_reset', entityType: 'System', entityId: 'all' });
-  res.json({ reset: true, message: 'All data cleared' });
+  res.json({
+    reset: true,
+    message: 'All lead + pipeline data cleared. DNC entries, consent events, and audit logs preserved (compliance records).'
+  });
 });
 
 // ─── TARGETED CLEANUP ───
