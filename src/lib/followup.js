@@ -80,7 +80,8 @@ async function handleCallOutcome(lead, analysis, actor = 'system') {
       updates.scheduledCallAt = retryAt;
       await callQueue.add('make-call', { leadId: lead.id }, {
         delay: Math.max(retryAt - Date.now(), 60000),
-        priority: leadPriority(lead)
+        priority: leadPriority(lead),
+        jobId: `call:${lead.id}` // Bull dedupe — one pending call job per lead
       });
       task = await createTask({
         leadId: lead.id,
@@ -110,7 +111,8 @@ async function handleCallOutcome(lead, analysis, actor = 'system') {
         updates.scheduledCallAt = retryAt;
         await callQueue.add('make-call', { leadId: lead.id }, {
           delay: Math.max(retryAt - Date.now(), 60000),
-          priority: leadPriority(lead)
+          priority: leadPriority(lead),
+          jobId: `call:${lead.id}` // Bull dedupe — one pending call job per lead
         });
         console.log(`🔁 Retry scheduled for ${label} (attempt ${attempts}/${MAX_CALL_ATTEMPTS})`);
       }

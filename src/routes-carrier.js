@@ -5,18 +5,30 @@
 
 const { matchCarriers, getCarrierNames, getTopCarriersForLead } = require('./lib/carriers');
 const { sendQualificationFollowUp } = require('./lib/messaging');
+const { requireAdminKey } = require('./lib/auth');
+
+// Escape every value interpolated into the diagnosis HTML (SPEC §6) —
+// lead/carrier fields are attacker-controllable (scraper input).
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 function attachCarrierRoutes(app, pool) {
 
   // List carriers by state
-  app.get('/api/carriers', (req, res) => {
+  app.get('/api/carriers', requireAdminKey, (req, res) => {
     const { state } = req.query;
     const names = state ? getCarrierNames(state) : [];
     res.json({ count: names.length, carriers: names });
   });
 
   // Match carriers for a risk profile
-  app.post('/api/match-carriers', (req, res) => {
+  app.post('/api/match-carriers', requireAdminKey, (req, res) => {
     try {
       const result = matchCarriers(req.body);
       res.json(result);
@@ -26,7 +38,7 @@ function attachCarrierRoutes(app, pool) {
   });
 
   // Admin diagnosis page for a lead
-  app.get('/admin/carrier-match/:leadId', async (req, res) => {
+  app.get('/admin/carrier-match/:leadId', requireAdminKey, async (req, res) => {
     const lead = await pool.query('SELECT * FROM leads WHERE id = $1', [req.params.leadId]);
     if (!lead.rows[0]) return res.status(404).send('Lead not found');
 
@@ -57,22 +69,22 @@ function attachCarrierRoutes(app, pool) {
     </style></head><body>
     <h2>🎯 Carrier Diagnosis</h2>
     <div class="card">
-      <p><strong>${l.company || l.name}</strong></p>
-      <p>${l.state} | ${l.vehicle_count || '?'} vehicles | ${l.industry || 'Unknown'}</p>
+      <p><strong>${escapeHtml(l.company || l.name)}</strong></p>
+      <p>${escapeHtml(l.state)} | ${escapeHtml(l.vehicle_count || '?')} vehicles | ${escapeHtml(l.industry || 'Unknown')}</p>
       ${l.has_dui ? '<span class="tag" style="background:#ef4444;color:#fff">DUI on record</span>' : ''}
       ${l.hazmat ? '<span class="tag" style="background:#f59e0b;color:#000">Hazmat</span>' : ''}
     </div>
-    <h3 style="color:#22c55e">✅ Will Write (${data.match_count} carriers)</h3>
+    <h3 style="color:#22c55e">✅ Will Write (${escapeHtml(data.match_count)} carriers)</h3>
     ${data.all_matches.map((c,i) => `
       <div class="card ${c.instant_bind ? 'instant' : c.quote_turnaround_hours <= 24 ? 'fast' : 'standard'}">
         ${i === 0 ? '<span class="top-pick">TOP PICK</span>' : ''}
-        <div class="carrier-name">${c.carrier_name}</div>
-        <div class="reasons">${c.match_reasons?.join(' • ') || 'Appetite match'}</div>
-        <div style="margin-top:8px;font-size:13px;color:#cbd5e1">${c.notes}</div>
+        <div class="carrier-name">${escapeHtml(c.carrier_name)}</div>
+        <div class="reasons">${escapeHtml(c.match_reasons?.join(' • ') || 'Appetite match')}</div>
+        <div style="margin-top:8px;font-size:13px;color:#cbd5e1">${escapeHtml(c.notes)}</div>
         <div style="margin-top:6px">
-          <span class="tag">${c.instant_bind ? '⚡ Instant Bind' : c.quote_turnaround_hours + 'hr quote'}</span>
-          <span class="tag">${c.lines?.slice(0,2).join(', ')}</span>
-          ${c.dui_lookback_months ? `<span class="tag">DUI: ${c.dui_lookback_months/12}yr</span>` : '<span class="tag" style="background:#ef4444;color:#fff">No DUI</span>'}
+          <span class="tag">${c.instant_bind ? '⚡ Instant Bind' : escapeHtml(c.quote_turnaround_hours + 'hr quote')}</span>
+          <span class="tag">${escapeHtml(c.lines?.slice(0,2).join(', '))}</span>
+          ${c.dui_lookback_months ? `<span class="tag">DUI: ${escapeHtml(c.dui_lookback_months/12)}yr</span>` : '<span class="tag" style="background:#ef4444;color:#fff">No DUI</span>'}
         </div>
       </div>
     `).join('')}
