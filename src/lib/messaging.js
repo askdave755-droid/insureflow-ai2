@@ -2,6 +2,7 @@
 // SMS / EMAIL MESSAGING - BREVO ONLY
 // src/lib/messaging.js
 // Nexus G Partners branding (replaces Smart Choice)
+// TFN: +1 (866) 505-6792 (approved 09/04/2026)
 // ============================================
 
 const axios = require('axios');
@@ -9,6 +10,7 @@ const axios = require('axios');
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const EMAIL_FROM = process.env.EMAIL_FROM || 'askdave755@gmail.com';
 const CALENDLY_LINK = process.env.CALENDLY_LINK;
+const BREVO_SMS_SENDER = process.env.BREVO_SMS_SENDER || '+18665056792';
 
 // ─── BREVO SMS ───
 async function sendSMS(to, message) {
@@ -21,7 +23,7 @@ async function sendSMS(to, message) {
     const response = await axios.post(
       'https://api.brevo.com/v3/transactionalSMS/sms',
       {
-        sender: 'NexusG',
+        sender: BREVO_SMS_SENDER,
         recipient: formatted,
         content: message,
         type: 'transactional'
@@ -33,7 +35,7 @@ async function sendSMS(to, message) {
         }
       }
     );
-    console.log(`✅ Brevo SMS sent: ${response.data.reference}`);
+    console.log(`✅ Brevo SMS sent from ${BREVO_SMS_SENDER}: ${response.data.reference}`);
     return response.data;
   } catch (error) {
     console.error('❌ Brevo SMS failed:', error.response?.data || error.message);
