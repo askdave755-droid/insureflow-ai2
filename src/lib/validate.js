@@ -1,6 +1,7 @@
 const { parsePhoneNumber } = require('libphonenumber-js');
 const { DateTime } = require('luxon');
 const { STATE_CONFIG, CALL_HOURS } = require('../config');
+const { getTopCarriersForLead } = require('./carriers');
 
 function formatPhoneE164(phone) {
   try {
@@ -63,26 +64,18 @@ function calculateUrgency(xDate) {
   return `on ${renewal.toLocaleDateString()}`;
 }
 
-// First Connect panel carrier mentions (Nexus G Partners)
+// ─── CARRIER MENTION — NOW LIVE FROM 62-CARRIER DATABASE ───
 function getCarrierMention(lead) {
+  try {
+    const { top3 } = getTopCarriersForLead(lead);
+    if (top3) return top3;
+  } catch (err) {
+    console.warn('⚠️ Carrier match failed, using fallback:', err.message);
+  }
+
+  // Fallback only if match fails
   const stateCfg = STATE_CONFIG[lead.state];
-  const industry = (lead.industry || '').toLowerCase();
-  const naics = lead.naicsCode || '';
-
-  if (industry.includes('truck') || industry.includes('transport') || naics.startsWith('484')) {
-    return 'Cover Whale for the fleet, plus RT Connector for anything hard to place';
-  }
-  if (industry.includes('construct') || naics.startsWith('238')) {
-    return 'Forge and RLI—they specialize in contractors';
-  }
-  if (industry.includes('manufacturing') || naics.startsWith('336')) {
-    return 'Nirvana on the fleet side, and Employers for workers comp';
-  }
-  if (lead.revenue > 5000000 || lead.employeeCount > 50) {
-    return 'RT Connector E&S markets for larger operations';
-  }
-
-  return stateCfg?.carriers || 'Cover Whale and Nirvana';
+  return stateCfg?.carriers || 'our preferred carriers';
 }
 
 function getNaturalOpener(lead) {
