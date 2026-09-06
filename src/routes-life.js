@@ -208,11 +208,17 @@ function attachLifeRoutes(app, pool) {
     };
 
     if (lead.email) {
+      const IMN_URL = process.env.IMN_URL || 'https://insuremenowdirect.com/agent/dawudrafael/';
+      const first = (lead.name || 'there').split(' ')[0];
       await brevoEmail(lead.email,
-        (lead.name || '').split(' ')[0] + ', your life insurance quotes are ready',
+        first + ', your life insurance quotes are ready',
         quotesEmailHtml(lead, ff));
+      await brevoSMS(lead.phone,
+        first + ', Brady here (Nexus G Partners) - your quotes are in your inbox (' + lead.email +
+        '). Or see rates in 90 seconds here: ' + IMN_URL + '?src=brady-sms&ref=' + lead.id +
+        ' Reply STOP to opt out');
       await prisma.lead.update({ where: { id: lead.id }, data: { quoteEmailSent: true } });
-      res.json({ success: true, channel: 'email', sentTo: lead.email });
+      res.json({ success: true, channel: 'email+sms', sentTo: lead.email, smsTo: lead.phone });
     } else {
       await brevoSMS(lead.phone,
         'Brady here (Nexus G Partners) - what is the best email for your quotes? Reply STOP to opt out');
