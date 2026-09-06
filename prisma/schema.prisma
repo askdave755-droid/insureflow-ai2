@@ -140,6 +140,7 @@ model Lead {
   costs        Cost[]
   opportunities Opportunity[]
   tasks        Task[]
+  lifeFactFind LifeFactFind?
 
   @@index([state, status])
   @@index([source, createdAt])
@@ -416,6 +417,38 @@ model Renewal {
 
   @@index([renewalDate, stage])
   @@map("renewals")
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// LIFE VERTICAL — Russell-method 2-minute fact-find (Sept 2026)
+// One per lead; captured from Vapi call transcript or manual entry.
+// ═══════════════════════════════════════════════════════════════════
+model LifeFactFind {
+  id               String   @id @default(uuid())
+  leadId           String   @unique @map("lead_id")
+
+  age              Int?
+  tobacco          Boolean?
+  healthFlags      String[] // coarse categories only: diabetes, heart, blood_pressure, cancer, respiratory
+  coverageGoal     Int?     @map("coverage_goal") // face amount in dollars
+  dependents       Int?
+  hasSpouse        Boolean? @map("has_spouse")
+  existingCoverage String?  @map("existing_coverage") // none / employer_group / own_policy
+  monthlyBudget    Int?     @map("monthly_budget")
+  email            String?  // captured on the call (may differ from lead email)
+  notes            String?  @db.Text
+
+  score            Int      @default(0) // completeness 0-100 (age 25, tobacco 20, coverage 25, health 10, existing 10, budget 5, deps 5)
+  source           String   @default("vapi_call") // vapi_call / manual
+
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([score])
+  @@index([createdAt])
+  @@map("life_fact_finds")
 }
 
 // ═══════════════════════════════════════════════════════════════════
