@@ -249,6 +249,78 @@ function attachLifeRoutes(app, pool) {
     }
     res.json(out);
   });
+
+  // ── Bulk lead import (Apollo CSV for life, FMCSA CSV for commercial) ──
+  // POST /api/import/leads  { vertical: "life_fe"|"commercial_auto", autoCall?: false, leads?: [...], csv?: "name,phone,..." }
+  app.post('/api/import/leads', requireAdminKey, async (req, res) => {
+    const vertical = req.body.vertical;
+    if (!['life_fe', 'commercial_auto'].includes(vertical)) {
+      return res.status(400).json({ error: 'vertical must be life_fe or commercial_auto' });
+    }
+
+    // Accept JSON rows or raw CSV text (header row required)
+    let rows = req.body.leads;
+    if (!rows && req.body.csv) {
+      const lines = String(req.body.csv).split(/\r?\n/).filter(l => l.trim());
+      const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/[^a-z0-9]/g, '_'));
+      rows = lines.slice(1).map(l => {
+        const cols = l.match(/("([^"]|"")*"|[^,]*)(,|$)/g).map(c => c.replace(/,$/, '').replace(/^"|"$/g, '').replace(/""/g, '"').trim());
+        const o = {};
+        headers.forEach((h, i) => { o[h] = cols[i] || ''; });
+        return o;
+      });
+    }
+    if (!rows || !rows.length) return res.status(400).json({ error: 'leads array or csv string required' });
+
+    // Flexible column mapping (Apollo + FMCSA export names)
+    const pick = (o, ...keys) => { for (const k of keys) { if (o[k]) return String(o[k]).trim(); } return ''; };
+    const results = { imported: 0, skipped: 0, errors: 0, queued: 0, ids: [] };
+
+    for (const row of rows.slice(0, 2000)) {
+      try {
+        const first = pick(row, 'first_name', 'first', 'firstname');
+        const last = pick(row, 'last_name', 'last', 'lastname');
+        const name = pick(row, 'name', 'full_name', 'contact_name', 'legal_name', 'dba_name') || (first + ' ' + last).trim();
+        const phoneRaw = pick(row, 'phone', 'mobile_phone', 'work_direct_phone', 'phone_number', 'telephone', 'phone_1');
+        const state = pick(row, 'state', 'person_state', 'company_state', 'phy_state', 'st').toUpperCase().slice(0, 2);
+        const phone = formatPhoneE164(phoneRaw);
+        if (!name || name.length < 2 || !phone || !state) { results.skipped++; continue; }
+        if (!config.ALLOWED_STATES.includes(state)) { results.skipped++; continue; }
+
+        const existing = await prisma.lead.findFirst({ where: { phone, status: { notIn: ['closed', 'compliance_hold'] } } });
+        if (existing) { results.skipped++; continue; }
+
+        const isLife = vertical === 'life_fe';
+        const lead = await prisma.lead.create({
+          data: {
+            name,
+            phone,
+            email: pick(row, 'email', 'email_1', 'work_email', 'personal_email') || null,
+            company: pick(row, 'company', 'company_name', 'organization_name', 'legal_name', 'dba_name') || null,
+            title: pick(row, 'title', 'job_title') || null,
+            industry: pick(row, 'industry', 'occupation', 'operation_classification', 'cargo_carried') || null,
+            occupation: isLife ? (pick(row, 'occupation', 'industry', 'title') || null) : null,
+            state,
+            city: pick(row, 'city', 'person_city', 'company_city', 'phy_city') || null,
+            insuranceType: isLife ? 'life' : 'commercial_auto',
+            vertical,
+            source: isLife ? 'apollo_import' : 'fmcsa_import',
+            status: 'pending'
+          }
+        });
+        results.imported++;
+        results.ids.push(lead.id);
+
+        if (req.body.autoCall === true) {
+          await callQueue.add('make-call', { leadId: lead.id }, { delay: 5000 + results.queued * 90000, priority: 5 });
+          results.queued++;
+        }
+      } catch (e) { results.errors++; }
+    }
+
+    console.log('Import ' + vertical + ': ' + results.imported + ' imported, ' + results.skipped + ' skipped, ' + results.queued + ' queued');
+    res.json({ success: true, vertical, ...results, ids: results.ids.slice(0, 20) });
+  });
 }
 
 module.exports = { attachLifeRoutes };
