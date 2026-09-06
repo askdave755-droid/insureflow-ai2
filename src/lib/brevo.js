@@ -1,17 +1,16 @@
 /**
- * lib/brevo.js - Email + SMS via Brevo (replaces SendGrid + TextMagic)
- * Env: BREVO_API_KEY, BREVO_SENDER (verified domain required)
+ * brevo.js - Brevo (Sendinblue) transactional email + SMS.
+ * Env: BREVO_API_KEY, BREVO_SENDER (verified sender email), BREVO_SMS_SENDER (SMS sender, e.g. +18665056792)
  */
 const axios = require('axios');
 
 const API_KEY = process.env.BREVO_API_KEY;
-const SENDER = process.env.BREVO_SENDER || 'brady@yourdomain.com';
+const SENDER = process.env.BREVO_SENDER || 'noreply@example.com';
+const SMS_SENDER = process.env.BREVO_SMS_SENDER || 'Brady';
 
-function formatPhone(p) {
-  if (!p) return p;
-  let d = String(p).replace(/\D/g, '');
-  if (d.length === 10) d = '1' + d;
-  return '+' + d;
+function formatPhone(phone) {
+  const d = String(phone).replace(/\D/g, '');
+  return d.startsWith('1') ? '+' + d : '+1' + d;
 }
 
 async function brevoEmail(to, subject, html) {
@@ -35,7 +34,7 @@ async function brevoSMS(phone, text) {
   if (!API_KEY || !phone) return null;
   try {
     const r = await axios.post('https://api.brevo.com/v3/transactionalSMS/sms', {
-      sender: 'Brady',
+      sender: SMS_SENDER,
       recipient: formatPhone(phone),
       content: text,
       type: 'transactional'
