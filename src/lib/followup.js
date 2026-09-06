@@ -2,7 +2,7 @@
 // FOLLOW-UP ENGINE (Phase 3)
 // Routes every completed call to its next action:
 // booked/interested → Brevo follow-up + conversion + Dave task
-// callback          → requeue at next window + task
+// callback          → Calendly SMS (keep Brady's promise) + requeue + task
 // no_answer         → retry up to 3 attempts, then nurture + task
 // dnc               → internal DNC + compliance hold (never contacted again)
 // not_interested    → closed
@@ -75,6 +75,17 @@ async function handleCallOutcome(lead, analysis, actor = 'system') {
     }
 
     case 'callback': {
+      // Brady promised a text with the calendar link — keep the promise.
+      try {
+        const { brevoSMS } = require('./brevo');
+        const config = require('../config');
+        const first = (lead.name || 'there').split(' ')[0];
+        await brevoSMS(lead.phone,
+          first + ', Brady here (Nexus G Partners) - good talking. Grab your 4-minute comparison slot here: ' +
+          config.CALENDLY_LINK + ' Reply STOP to opt out');
+      } catch (err) {
+        console.warn(`⚠️ Callback SMS failed for ${label}: ${err.message}`);
+      }
       const retryAt = getNextBusinessTime(lead.state);
       updates.status = 'scheduled';
       updates.scheduledCallAt = retryAt;
