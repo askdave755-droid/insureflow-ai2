@@ -29,6 +29,11 @@ OPENER:
 
 If asked how you got their number: "You're a {{occupation}}, right? {{occupation_plural}} are all we work with. That's how."
 
+IDENTITY QUESTIONS - "who is this," "how did you get my number," "what is this about" are NOT objections. Answer them directly and keep going:
+- Who: "This is Brady with Nexus G Partners - I specialize in life insurance for {{occupation_plural}}."
+- How: "You're a {{occupation}}, right? {{occupation_plural}} are all we work with. That's how."
+Then IMMEDIATELY the next fact-find question. These never count as objections.
+
 FACT-FIND (in order, ONE question at a time):
 1. "Who do you have it with?"
 2. "How much you paying?"
@@ -41,7 +46,7 @@ FACT-FIND (in order, ONE question at a time):
    [If yes] "What are you taking?"
 7. If email on file: "Your email still {{email}}?" (read it to them). Else: "What's the best email to send quotes to?"
 
-OBJECTIONS - for ANY objection ("got plenty," "can't afford it," "through work," "not interested"):
+OBJECTIONS - for REAL objections only ("got plenty," "can't afford it," "through work," "not interested"):
 "Exactly - that's why I called," then IMMEDIATELY the next fact-find question. Never explain.
 
 CLOSE (after email captured):
@@ -138,15 +143,16 @@ function extractFactFind(transcript) {
     if (v >= 1000) ff.coverage_amount = v;
   }
 
-  // EMAIL — STT mangles dictation ("Send it to. Ask. Dave7. 55@gmail.com").
-  // Take the user line containing '@', strip filler words, join every alnum
-  // token before the '@' into the local part, and clean the domain.
-  const emailLine = uLines.find(l => l.includes('@')) || '';
+  // EMAIL — STT mangles dictation ("Askdave. Send it to askdave755@gmail.com").
+  // Take the LAST user line containing '@' (people re-dictate to correct),
+  // drop filler words anywhere in the local part, join alnum tokens.
+  const FILLER = new Set(['send','it','to','my','email','is','the','best','at','me','um','uh','yeah','yes','okay','ok','just','gave','you','one','i']);
+  const emailLines = uLines.filter(l => l.includes('@'));
+  const emailLine = emailLines[emailLines.length - 1] || '';
   const emailM = emailLine.match(/([\w.\s+-]+)@\s*([\w\s.-]+)/);
   if (emailM) {
-    const FILLER = new Set(['send','it','to','my','email','is','the','best','at','me']);
-    const tokens = emailM[1].match(/[a-zA-Z0-9]+/g) || [];
-    while (tokens.length && FILLER.has(tokens[0].toLowerCase())) tokens.shift();
+    const tokens = (emailM[1].match(/[a-zA-Z0-9]+/g) || [])
+      .filter(tok => !FILLER.has(tok.toLowerCase()));
     const local = tokens.join('').toLowerCase();
     const domClean = emailM[2].replace(/\s+/g, '').toLowerCase()
       .replace(/[^a-z0-9.]/g, '').replace(/\.{2,}/g, '.').replace(/\.$/, '');
@@ -177,20 +183,21 @@ function quotesEmailHtml(lead, ff) {
 }
 
 // Called from /webhook/vapi/done when lead.vertical === 'life_fe'
-// Qualified = age captured AND an email to send quotes to — fresh from the
-// call OR already on file (question 7 often just confirms the on-file
-// email, so nothing new appears in the transcript).
+// Qualified = age captured AND an email to send quotes to — on-file email
+// WINS over STT-dictated (question 7 usually just confirms it, and
+// dictated emails are untrustworthy). A dictated email only fills an
+// EMPTY email field, never overwrites one.
 // Money path fires BOTH channels: quotes email + SMS with the IMN link.
 async function handleLifeCallDone(lead, callData, pool) {
   const transcript = callData.transcript || callData.summary || '';
   const ff = extractFactFind(transcript);
-  const toEmail = ff.email || lead.email || null;
+  const toEmail = lead.email || ff.email || null;
   const qualified = !!(ff.age && toEmail);
 
   await pool.query(
     `UPDATE leads SET status='called', qualified=$1, age=$2, smoker=$3, medications=$4,
        monthly_premium=$5, coverage_amount=$6,
-       email=COALESCE($7, email), transcript=$8, updated_at=CURRENT_TIMESTAMP
+       email=CASE WHEN email IS NULL THEN $7 ELSE email END, transcript=$8, updated_at=CURRENT_TIMESTAMP
      WHERE id=$9`,
     [qualified, ff.age || null, ff.smoker ?? null, ff.medications || null,
      ff.monthly_premium || null, ff.coverage_amount || null, ff.email || null,
