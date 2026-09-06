@@ -36,8 +36,8 @@ function extractLifeFactFind(transcript = '', summary = '') {
   const ff = {};
 
   // Age: "I'm 45" / "45 years old" / "age 45"
-  let m = lower.match(/(?:i'?m|i am|age[d]?|about)\s*(\d{2})\s*(?:years? old|y/?o)?/) ||
-          lower.match(/\b(\d{2})\s*(?:years? old|y/?o)\b/);
+  let m = lower.match(/(?:i'?m|i am|age[d]?|about)\s*(\d{2})\s*(?:years? old|y\/?o)?/) ||
+          lower.match(/\b(\d{2})\s*(?:years? old|y\/?o)\b/);
   if (m) {
     const age = parseInt(m[1], 10);
     if (age >= 18 && age <= 85) ff.age = age;
