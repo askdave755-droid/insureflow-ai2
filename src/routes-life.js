@@ -9,7 +9,7 @@ const prisma = require('./db');
 const { callQueue } = require('./queue');
 const { CITY_COORDS, hasdataMapsSearch, importHasDataRows } = require('./lib/hasdata');
 const { formatPhoneE164 } = require('./lib/validate');
-const { sendLifeFollowUp } = require('./lib/life');
+const { sendLifeFollowUp, factFindScore } = require('./lib/life');
 const { requireAdminKey } = require('./lib/auth');
 const config = require('./config');
 
@@ -23,7 +23,7 @@ function attachLifeRoutes(app, pool) {
     if (!ll) return res.status(400).json({ error: 'city not in CITY_COORDS - add coordinates to lib/hasdata.js first' });
     try {
       const data = await hasdataMapsSearch(query, ll, start);
-      const stats = await importHasDataRows(data, pool);
+      const stats = await importHasDataRows(data, pool, query);
       console.log('HasData ' + query + ' / ' + city + ': ' + stats.imported + ' imported, ' + stats.skipped + ' skipped');
       res.json({ city, query, ...stats });
     } catch (e) {
@@ -35,7 +35,7 @@ function attachLifeRoutes(app, pool) {
   // Optional: no-code scraper product webhook (not needed for direct API, kept for later)
   app.post('/api/scraper/hasdata', async (req, res) => {
     const rows = req.body?.results || (Array.isArray(req.body) ? req.body : [req.body]);
-    const stats = await importHasDataRows(rows, pool);
+    const stats = await importHasDataRows(rows, pool, req.body?.query || null);
     console.log('HasData webhook: ' + stats.imported + ' imported, ' + stats.skipped + ' skipped');
     res.json(stats);
   });
@@ -51,7 +51,7 @@ function attachLifeRoutes(app, pool) {
     res.json(r.rows);
   });
 
-  // ── Additional life endpoints (Prisma-native) ──
+  // ── Additional life endpoints ──
 
   // Manual life lead entry: POST /api/life/leads
   // { name, phone, email?, company?, occupation?, state, city?, autoCall? }
@@ -136,25 +136,76 @@ function attachLifeRoutes(app, pool) {
     }
   });
 
-  // Re-send InsureMeNow quote link: POST /api/life/factfind/:leadId/resend
-  app.post('/api/life/factfind/:leadId/resend', requireAdminKey, async (req, res) => {
-    const lead = await prisma.lead.findUnique({ where: { id: req.params.leadId }, include: { lifeFactFind: true } });
-    if (!lead) return res.status(404).json({ error: 'Lead not found' });
-    await sendLifeFollowUp(lead, lead.lifeFactFind || {});
-    await pool.query(`UPDATE leads SET quote_email_sent=true, updated_at=NOW() WHERE id=$1`, [lead.id]);
-    res.json({ success: true, sentTo: { phone: lead.phone, email: lead.lifeFactFind?.email || lead.email } });
+  // Fact-find list — reads the fact-find columns on leads directly.
+  // GET /api/life/factfinds?minScore=50&limit=50
+  app.get('/api/life/factfinds', requireAdminKey, async (req, res) => {
+    const { minScore = 50, limit = 50 } = req.query;
+    const leads = await prisma.lead.findMany({
+      where: { vertical: 'life_fe', age: { not: null } },
+      orderBy: { updatedAt: 'desc' },
+      take: parseInt(limit),
+      select: {
+        id: true, name: true, phone: true, email: true, company: true,
+        state: true, city: true, occupation: true, status: true, qualified: true,
+        age: true, smoker: true, medications: true,
+        monthlyPremium: true, coverageAmount: true, quoteEmailSent: true,
+        updatedAt: true
+      }
+    });
+    const scored = leads
+      .map(l => ({
+        ...l,
+        score: factFindScore({
+          age: l.age,
+          tobacco: l.smoker,
+          coverageGoal: l.coverageAmount,
+          monthlyBudget: l.monthlyPremium,
+          healthFlags: l.medications ? l.medications.split(',') : undefined
+        })
+      }))
+      .filter(l => l.score >= parseInt(minScore));
+    res.json(scored);
   });
 
-  // Fact-find list: GET /api/life/factfinds?minScore=50&limit=50
-  app.get('/api/life/factfinds', requireAdminKey, async (req, res) => {
-    const { minScore = 0, limit = 50 } = req.query;
-    const factFinds = await prisma.lifeFactFind.findMany({
-      where: { score: { gte: parseInt(minScore) } },
-      orderBy: { createdAt: 'desc' },
-      take: parseInt(limit),
-      include: { lead: { select: { id: true, name: true, phone: true, email: true, company: true, state: true, occupation: true, status: true } } }
+  // Manual fact-find entry/edit: POST /api/life/factfind/:leadId
+  // { age?, smoker?, medications?, coverageAmount?, monthlyPremium? }
+  app.post('/api/life/factfind/:leadId', requireAdminKey, async (req, res) => {
+    const schema = z.object({
+      age: z.number().min(18).max(85).optional(),
+      smoker: z.boolean().optional(),
+      medications: z.string().optional(),
+      coverageAmount: z.number().optional(),
+      monthlyPremium: z.number().optional()
     });
-    res.json(factFinds);
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error });
+
+    const lead = await prisma.lead.findUnique({ where: { id: req.params.leadId } });
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+
+    const updated = await prisma.lead.update({ where: { id: lead.id }, data: parsed.data });
+    res.json({
+      success: true,
+      lead: updated,
+      score: factFindScore({
+        age: updated.age, tobacco: updated.smoker,
+        coverageGoal: updated.coverageAmount, monthlyBudget: updated.monthlyPremium
+      })
+    });
+  });
+
+  // Re-send InsureMeNow quote link: POST /api/life/factfind/:leadId/resend
+  app.post('/api/life/factfind/:leadId/resend', requireAdminKey, async (req, res) => {
+    const lead = await prisma.lead.findUnique({ where: { id: req.params.leadId } });
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    await sendLifeFollowUp(lead, {
+      age: lead.age,
+      tobacco: lead.smoker,
+      coverageGoal: lead.coverageAmount,
+      monthlyBudget: lead.monthlyPremium,
+      email: lead.email
+    });
+    res.json({ success: true, sentTo: { phone: lead.phone, email: lead.email } });
   });
 }
 

@@ -2,14 +2,16 @@
 // LIFE VERTICAL — Russell-method 2-minute fact-find
 // Small-biz owners (occupation from HasData Maps Categories)
 // → Vapi fact-find → Brevo SMS/email → InsureMeNow close
+//
+// Fact-find fields live ON THE LEAD ROW (original schema):
+//   age, smoker, medications, monthly_premium, coverage_amount
+// Extraction uses neutral names here (tobacco, coverageGoal,
+// monthlyBudget) — callWorker maps them onto the columns.
 // ═══════════════════════════════════════════════
 
-const axios = require('axios');
 const config = require('../config');
 
 // ─── OPENERS ───
-// Life angle: business owner protecting family + business.
-// No renewal hook (life has no X-date) — lead with occupation context.
 function getLifeOpener(lead) {
   const firstName = (lead.name || 'there').split(' ')[0];
   const occupation = lead.occupation || lead.industry || lead.title || null;
@@ -29,13 +31,11 @@ function getLifeOpener(lead) {
 
 // ─── FACT-FIND EXTRACTION ───
 // Russell method: age, tobacco, health, coverage goal, dependents, budget.
-// Deterministic extraction from transcript/summary — no external AI call.
 function extractLifeFactFind(transcript = '', summary = '') {
   const text = `${summary}\n${transcript}`;
   const lower = text.toLowerCase();
   const ff = {};
 
-  // Age: "I'm 45" / "45 years old" / "age 45"
   let m = lower.match(/(?:i'?m|i am|age[d]?|about)\s*(\d{2})\s*(?:years? old|y\/?o)?/) ||
           lower.match(/\b(\d{2})\s*(?:years? old|y\/?o)\b/);
   if (m) {
@@ -43,14 +43,12 @@ function extractLifeFactFind(transcript = '', summary = '') {
     if (age >= 18 && age <= 85) ff.age = age;
   }
 
-  // Tobacco / nicotine
   if (/\b(non[- ]?smoker|don'?t smoke|no tobacco|never smoked|quit (?:smoking|tobacco))\b/.test(lower)) {
     ff.tobacco = false;
   } else if (/\b(smoker|smoke|tobacco|cigarettes?|vape|vaping|chew)\b/.test(lower)) {
     ff.tobacco = true;
   }
 
-  // Health flags (rate-class killers)
   const flags = [];
   if (/\bdiabet/.test(lower)) flags.push('diabetes');
   if (/\b(heart|cardiac|stent|bypass)\b/.test(lower)) flags.push('heart');
@@ -62,7 +60,6 @@ function extractLifeFactFind(transcript = '', summary = '') {
     ff.healthFlags = [];
   }
 
-  // Coverage goal: "$500k" / "half a million" / "a million" / "250,000"
   m = lower.match(/\$?\s*(\d+(?:\.\d+)?)\s*(?:k|thousand)\b/);
   if (m) ff.coverageGoal = Math.round(parseFloat(m[1]) * 1000);
   if (!ff.coverageGoal) {
@@ -81,7 +78,6 @@ function extractLifeFactFind(transcript = '', summary = '') {
     if (m) ff.coverageGoal = parseInt(m[1] + m[2], 10);
   }
 
-  // Dependents: "3 kids" / "two kids and my wife"
   m = lower.match(/\b(\d+|one|two|three|four|five|six)\s*(?:kids?|children)\b/);
   if (m) {
     const word = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
@@ -89,7 +85,6 @@ function extractLifeFactFind(transcript = '', summary = '') {
   }
   if (/\b(wife|husband|spouse)\b/.test(lower)) ff.hasSpouse = true;
 
-  // Existing coverage
   if (/\b(no coverage|don'?t have (any|life)|nothing|no life insurance|not covered)\b/.test(lower)) {
     ff.existingCoverage = 'none';
   } else if (/\b(through (my |the )?(work|job|employer)|group life|work policy)\b/.test(lower)) {
@@ -98,19 +93,17 @@ function extractLifeFactFind(transcript = '', summary = '') {
     ff.existingCoverage = 'own_policy';
   }
 
-  // Budget: "$50 a month" / "hundred bucks"
   m = lower.match(/\$\s*(\d{2,4})\s*(?:a|per|\/)?\s*month/);
   if (m) ff.monthlyBudget = parseInt(m[1], 10);
 
-  // Email capture (Vapi often normalizes in summary)
   m = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
   if (m) ff.email = m[0].toLowerCase();
 
   return ff;
 }
 
-// Fact-find completeness: Russell method needs age + tobacco + coverage goal
-// minimum to quote; everything else sharpens the class.
+// Completeness score: age 25, tobacco 20, coverage 25, health 10,
+// existing 10, budget 5, dependents 5 (max 100).
 function factFindScore(ff) {
   let score = 0;
   if (ff.age) score += 25;
@@ -123,9 +116,7 @@ function factFindScore(ff) {
   return Math.min(score, 100);
 }
 
-// ─── QUALIFICATION ───
-// A life lead is qualified when: interested/booked disposition AND
-// we captured enough fact-find to quote (score >= 50).
+// Qualified = interested/booked disposition AND fact-find score >= 50.
 function analyzeLifeCall({ transcript = '', summary = '', successEvaluation, duration = null }) {
   const { detectDisposition } = require('./qualify');
   const disposition = detectDisposition({ transcript, summary, successEvaluation, duration });
