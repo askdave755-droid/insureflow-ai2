@@ -1,3 +1,9 @@
+// ============================================
+// VAPI OUTBOUND CALLING
+// Branches by vertical: commercial (default assistant)
+// vs life (Russell-method 2-min fact-find assistant).
+// ============================================
+
 const axios = require('axios');
 const config = require('../config');
 
@@ -10,10 +16,13 @@ const vapiClient = axios.create({
   timeout: 10000
 });
 
-async function makeCall(lead) {
+function isLifeLead(lead) {
+  return (lead.insuranceType || '').toLowerCase().startsWith('life');
+}
+
+function commercialVariables(lead) {
   const { getNaturalOpener, getCarrierMention, calculateUrgency } = require('./validate');
-  
-  const variables = {
+  return {
     lead_name: lead.name.split(' ')[0],
     full_name: lead.name,
     company: lead.company || 'your business',
@@ -32,10 +41,33 @@ async function makeCall(lead) {
     state: lead.state,
     industry_focus: config.STATE_CONFIG[lead.state]?.vertical || 'commercial_auto'
   };
+}
+
+function lifeVariables(lead) {
+  const { getLifeOpener } = require('./life');
+  return {
+    lead_name: lead.name.split(' ')[0],
+    full_name: lead.name,
+    company: lead.company || 'your business',
+    occupation: lead.industry || lead.title || 'business owner',
+    natural_opener: getLifeOpener(lead),
+    insuremenow_link: config.INSUREMENOW_LINK,
+    state: lead.state,
+    time_commitment: '2 minutes'
+  };
+}
+
+async function makeCall(lead) {
+  const life = isLifeLead(lead);
+  const assistantId = life
+    ? (config.VAPI_LIFE_ASSISTANT_ID || config.VAPI_ASSISTANT_ID)
+    : config.VAPI_ASSISTANT_ID;
+
+  const variables = life ? lifeVariables(lead) : commercialVariables(lead);
 
   try {
     const response = await vapiClient.post('/call', {
-      assistantId: config.VAPI_ASSISTANT_ID,
+      assistantId,
       phoneNumberId: config.VAPI_PHONE_NUMBER_ID,
       customer: {
         number: lead.phone,
@@ -49,7 +81,8 @@ async function makeCall(lead) {
     return {
       success: true,
       callId: response.data.id,
-      cost: response.data.cost || 0
+      cost: response.data.cost || 0,
+      vertical: life ? 'life' : 'commercial'
     };
   } catch (error) {
     console.error('Vapi call failed:', error.response?.data || error.message);
@@ -57,4 +90,4 @@ async function makeCall(lead) {
   }
 }
 
-module.exports = { makeCall };
+module.exports = { makeCall, isLifeLead };

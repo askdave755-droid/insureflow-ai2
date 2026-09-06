@@ -1,0 +1,87 @@
+INSUREFLOWAI 2.0 — LIFE VERTICAL PATCH NOTES
+Pushed: 2026-09-06 (branch: main)
+
+WHAT THIS ADDS
+Russell-method 2-minute life insurance fact-find vertical, running in
+parallel with the existing commercial pipeline. Small-biz owners
+(occupation sourced from HasData Google Maps Categories) → Vapi life
+fact-find call → Brevo SMS + email with InsureMeNow close link.
+
+NEW FILES
+- src/routes-life.js    Life endpoints (leads, scrape, factfind, stats, test call)
+- src/lib/life.js       Life brain: openers, fact-find extraction,
+                        completeness scoring, qualification, Brevo
+                        follow-up, HasData scraper
+
+PATCHED FILES
+- src/config.js         + VAPI_LIFE_ASSISTANT_ID, INSUREMENOW_LINK,
+                        HASDATA_API_KEY env vars
+- src/lib/vapi.js       makeCall() branches: life leads use
+                        VAPI_LIFE_ASSISTANT_ID + life variables;
+                        exports isLifeLead()
+- src/workers/callWorker.js  Webhook branches life leads to
+                        handleLifeOutcome() (fact-find persistence +
+                        InsureMeNow follow-up + Dave task) instead of
+                        the commercial Account/Opportunity promotion
+- src/server.js         Mounts routes-life (/api/life/*), startup log
+
+DATABASE (REQUIRED BEFORE DEPLOY — see below)
+- prisma/schema.prisma  + LifeFactFind model (one per lead):
+                        age, tobacco, healthFlags, coverageGoal,
+                        dependents, hasSpouse, existingCoverage,
+                        monthlyBudget, email, score (0-100), source
+
+QUALIFICATION RULE (life)
+Qualified = disposition in (booked, interested) AND fact-find
+score >= 50. Score weights: age 25, tobacco 20, coverageGoal 25,
+healthFlags 10, existingCoverage 10, budget 5, dependents 5.
+
+ENDPOINTS
+POST /api/life/leads              Add life lead (autoCall default true)
+POST /api/life/scrape             HasData occupation scrape → leads → calls
+                                  { category, city, state, limit, autoCall }
+                                  [admin key required]
+POST /api/life/factfind/:leadId   Manual fact-find entry/edit [admin]
+GET  /api/life/factfinds          List fact-finds (?minScore=) [admin]
+POST /api/life/factfind/:leadId/resend  Re-send InsureMeNow link [admin]
+GET  /api/life/test-call/:phone   Browser test call (?force=true) [admin]
+GET  /api/life/stats              Life funnel numbers [admin]
+
+DEPLOY CHECKLIST
+1. Railway → PostgreSQL: apply schema change:
+     railway run npx prisma db push
+   (non-destructive — adds life_fact_finds table + relation only)
+2. Railway env vars to add:
+     VAPI_LIFE_ASSISTANT_ID  — new Vapi assistant running the
+                               Russell 2-min fact-find script
+     INSUREMENOW_LINK        — your InsureMeNow affiliate/buy link
+     HASDATA_API_KEY         — hasdata.com key for Maps Categories
+3. In Vapi: create the LIFE assistant (separate from commercial Brady):
+     - Voice: josh, speed 1.0, barge-in enabled
+     - Variables used: lead_name, full_name, company, occupation,
+       natural_opener, insuremenow_link, state, time_commitment
+     - Script goal: capture age, tobacco Y/N, health flags,
+       coverage goal, dependents, existing coverage, budget —
+       2 minutes max, then point to the link arriving by text.
+     - Server URL: SAME webhook — https://<app>.up.railway.app/webhook/vapi/done
+       (callWorker auto-detects life leads by insurance_type)
+4. Smoke tests (after deploy):
+     GET /api/life/test-call/<your-cell>?force=true  (x-admin-key header)
+     POST /api/life/scrape { category: "roofing contractor",
+                             city: "Detroit", state: "MI", limit: 5,
+                             autoCall: false }
+     GET /api/life/stats
+
+COMPLIANCE NOTES
+- Life vertical inherits the same gates: business hours 7AM-8PM per
+  state timezone, DNC engine, consent events, licensed-states allowlist
+  (MI/AZ/TN/FL as currently configured in config.js).
+- SMS includes STOP language (US toll-free requirement).
+- Fact-find contains health data — do NOT log transcripts to third
+  parties; healthFlags stored as coarse categories only.
+
+NOT IN THIS PATCH (next iterations)
+- HasData webhook/callback ingestion (currently request/response only)
+- Life dashboard section on Agency OS page
+- Rate-class pre-estimate (needs carrier rate tables)
+- Textract of spoken DOB (age is captured; full DOB is noisy in Vapi)

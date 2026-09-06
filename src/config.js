@@ -45,13 +45,6 @@ const STATE_CONFIG = {
     tone: 'friendly',
     timezone: 'America/New_York'
   }
-  // PENDING RENEWAL (expired 07/31/2026 — late-renew on NIPR):
-  // TX: { script: 'aggressive_business', priority: true, vertical: 'commercial_auto', carriers: 'Cover Whale, Nirvana, and RT Connector', opener: 'Texas businesses need protection from liability risks', wcAvailable: true, tone: 'direct', timezone: 'America/Chicago' },
-  // GA: { script: 'port_trucking', priority: true, vertical: 'commercial_auto', carriers: 'Cover Whale and Nirvana', opener: 'Atlanta and Savannah port trucking is booming', wcAvailable: true, tone: 'friendly', timezone: 'America/New_York' },
-  // AL: { script: 'manufacturing_growth', priority: false, vertical: 'commercial_auto', carriers: 'Cover Whale and RT Connector', opener: 'Alabama manufacturing is growing fast', wcAvailable: true, tone: 'friendly', timezone: 'America/Chicago' },
-  // UNVERIFIED LICENSE STATUS:
-  // OH: { script: 'rust_belt_mfg', priority: true, vertical: 'commercial_auto', carriers: 'Cover Whale, Nirvana, and Forge', opener: 'Ohio manufacturing has specific insurance needs', wcAvailable: true, tone: 'consultative', timezone: 'America/New_York' },
-  // IN: { script: 'logistics_corridor', priority: true, vertical: 'commercial_auto', carriers: 'Cover Whale, Nirvana, and Forge', opener: 'Indiana logistics corridor means fleet growth', wcAvailable: true, tone: 'friendly', timezone: 'America/Indiana/Indianapolis' }
 };
 
 const ALLOWED_STATES = Object.keys(STATE_CONFIG);
@@ -67,9 +60,15 @@ module.exports = {
   VAPI_API_KEY: process.env.VAPI_API_KEY,
   VAPI_ASSISTANT_ID: process.env.VAPI_ASSISTANT_ID,
   VAPI_PHONE_NUMBER_ID: process.env.VAPI_PHONE_NUMBER_ID,
-  // Shared secret Vapi sends with webhooks (set in Assistant → Server URL
-  // secret header). If unset, webhook auth logs a warning and allows (dev).
   VAPI_WEBHOOK_SECRET: process.env.VAPI_WEBHOOK_SECRET,
+
+  // ─── LIFE VERTICAL (Sept 2026) ───
+  // Separate Vapi assistant running the Russell-method 2-min fact-find.
+  VAPI_LIFE_ASSISTANT_ID: process.env.VAPI_LIFE_ASSISTANT_ID,
+  // Where qualified life leads close themselves (quote/buy link).
+  INSUREMENOW_LINK: process.env.INSUREMENOW_LINK || 'https://www.insuremenow.com',
+  // HasData Google Maps Categories scraper (occupation-sourced life leads).
+  HASDATA_API_KEY: process.env.HASDATA_API_KEY,
 
   BREVO_API_KEY: process.env.BREVO_API_KEY,
   EMAIL_FROM: process.env.EMAIL_FROM,

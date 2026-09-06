@@ -3,6 +3,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const config = require('./config');
 const routes = require('./routes');
+const lifeRoutes = require('./routes-life');
 const prisma = require('./db');
 const { attachCarrierRoutes } = require('./routes-carrier');
 require('./orchestrator');
@@ -38,6 +39,7 @@ app.use(express.static('public'));
 
 // Routes
 app.use(routes);
+app.use(lifeRoutes); // Life vertical (Russell-method fact-find) — /api/life/*
 
 // Carrier routes expect a pg-style pool; shim it over Prisma
 // ($queryRawUnsafe supports $1 positional params used by routes-carrier).
@@ -56,5 +58,6 @@ const PORT = config.PORT;
 app.listen(PORT, () => {
   console.log(`🚀 InsureFlowAI 2.0 running on port ${PORT}`);
   console.log(`📊 Health: ${config.BASE_URL}/health`);
+  console.log(`💚 Life:   ${config.BASE_URL}/api/life/stats`);
   console.log(`⏸️  Pause: ${config.BASE_URL}/admin/pause`);
 });
