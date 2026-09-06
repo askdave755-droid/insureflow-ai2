@@ -18,9 +18,9 @@ enum LeadStatus {
   calling
   called
   qualified
-  converted        // promoted to Account + Opportunity
+  converted
   nurture
-  compliance_hold  // blocked by compliance engine
+  compliance_hold
   rejected_timezone
   closed
 }
@@ -28,8 +28,8 @@ enum LeadStatus {
 enum ComplianceStatus {
   unchecked
   clear
-  hold       // missing consent / outside window — recheck later
-  blocked    // DNC / unlicensed state — do not contact
+  hold
+  blocked
 }
 
 enum OpportunityStage {
@@ -81,7 +81,7 @@ enum RenewalStage {
   LOST
 }
 
-// ─── LEAD (existing acquisition entity — unchanged shape, new links) ───
+// ─── LEAD ───
 model Lead {
   id               String           @id @default(uuid())
   name             String
@@ -117,12 +117,20 @@ model Lead {
   createdAt        DateTime         @default(now()) @map("created_at")
   updatedAt        DateTime         @updatedAt @map("updated_at")
 
-  // Vertical split: commercial_auto vs life_fe (life final expense)
-  vertical         String           @default("commercial_auto")
-  // Life vertical: occupation niche from HasData Maps Categories
-  // ("barbershop", "roofing contractor", ...) — grouped in /api/life/stats
-  occupation       String?
-  quoteEmailSent   Boolean          @default(false) @map("quote_email_sent")
+  // ── Life vertical (life_fe) — HasData identity ──
+  occupation        String?   // niche query, e.g. "barbershop"
+  occupationPlural  String?   @map("occupation_plural") // e.g. "barbershops"
+  categories        String?   // comma-joined Maps categories
+  placeId           String?   @unique @map("place_id")  // Google place_id — dedupe key
+  vertical          String?   @default("commercial_auto") // life_fe | commercial_auto
+
+  // ── Life vertical — Russell fact-find (captured on the call) ──
+  age               Int?
+  smoker            Boolean?
+  medications       String?   // free-text health/meds notes
+  monthlyPremium    Int?      @map("monthly_premium")  // budget they stated
+  coverageAmount    Int?      @map("coverage_amount")  // face-amount goal
+  quoteEmailSent    Boolean   @default(false) @map("quote_email_sent")
 
   // Phase 1 additions
   complianceStatus String           @default("unchecked") @map("compliance_status")
@@ -147,7 +155,6 @@ model Lead {
   costs        Cost[]
   opportunities Opportunity[]
   tasks        Task[]
-  lifeFactFind LifeFactFind?
 
   @@index([state, status])
   @@index([source, createdAt])
@@ -210,7 +217,7 @@ model DailyStat {
   @@map("daily_stats")
 }
 
-// ─── ACCOUNT (the transportation business) ───
+// ─── ACCOUNT ───
 model Account {
   id              String   @id @default(uuid())
   company         String
@@ -420,37 +427,6 @@ model Renewal {
 
   @@index([renewalDate, stage])
   @@map("renewals")
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// LIFE VERTICAL — Russell-method 2-minute fact-find (Sept 2026)
-// ═══════════════════════════════════════════════════════════════════
-model LifeFactFind {
-  id               String   @id @default(uuid())
-  leadId           String   @unique @map("lead_id")
-
-  age              Int?
-  tobacco          Boolean?
-  healthFlags      String[]
-  coverageGoal     Int?     @map("coverage_goal")
-  dependents       Int?
-  hasSpouse        Boolean? @map("has_spouse")
-  existingCoverage String?  @map("existing_coverage")
-  monthlyBudget    Int?     @map("monthly_budget")
-  email            String?
-  notes            String?  @db.Text
-
-  score            Int      @default(0)
-  source           String   @default("vapi_call")
-
-  createdAt        DateTime @default(now()) @map("created_at")
-  updatedAt        DateTime @updatedAt @map("updated_at")
-
-  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
-
-  @@index([score])
-  @@index([createdAt])
-  @@map("life_fact_finds")
 }
 
 // ═══════════════════════════════════════════════════════════════════

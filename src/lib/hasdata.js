@@ -7,7 +7,8 @@
  *   importHasDataRows(rows, pool)     -> { imported, skipped }
  *
  * Rows land in leads with vertical='life_fe', occupation=<query>,
- * source='hasdata_maps', status='pending'. Dedupe on phone.
+ * source='hasdata_maps', status='pending'.
+ * Dedupe order: place_id (unique) → phone.
  */
 const axios = require('axios');
 
@@ -55,6 +56,12 @@ function normalizePhone(raw) {
   return '+' + d;
 }
 
+// Singularize a niche query for the occupation column:
+// "barbershops" -> "barbershop", "roofing contractors" -> "roofing contractor"
+function singularize(query) {
+  return String(query).trim().replace(/s\b/i, '').replace(/\s+$/,'');
+}
+
 async function hasdataMapsSearch(query, ll, start = 0) {
   if (!HASDATA_API_KEY) throw new Error('HASDATA_API_KEY not set');
   const resp = await axios.get(`${HASDATA_BASE}/search`, {
@@ -66,17 +73,28 @@ async function hasdataMapsSearch(query, ll, start = 0) {
   return data?.localResults || data?.results || data?.data || (Array.isArray(data) ? data : []);
 }
 
-// Insert rows into leads (life_fe vertical). Best-effort per row;
-// dedupe on phone against any non-closed lead. Never throws mid-loop.
-async function importHasDataRows(rows, pool) {
+// Insert rows into leads (life_fe vertical). Best-effort per row.
+// Dedupe on place_id first (Google identity), then phone.
+async function importHasDataRows(rows, pool, query = null) {
   let imported = 0, skipped = 0;
   for (const row of rows) {
+    const placeId = row.placeId || row.place_id || null;
     const phone = normalizePhone(row.phone || row.phoneNumber);
     if (!phone) { skipped++; continue; }
 
     const name = row.title || row.name || 'Business Owner';
     const { city, state } = parseCityState(row.address || row.fullAddress);
+    const occupationPlural = query || row.occupation || null;
+    const occupation = occupationPlural ? singularize(occupationPlural) : null;
+    const categories = Array.isArray(row.types) ? row.types.join(',')
+                     : Array.isArray(row.categories) ? row.categories.join(',')
+                     : (row.type || row.category || null);
 
+    // Dedupe: place_id first
+    if (placeId) {
+      const dup = await pool.query(`SELECT id FROM leads WHERE place_id=$1 LIMIT 1`, [placeId]);
+      if (dup.rows.length) { skipped++; continue; }
+    }
     const dup = await pool.query(
       `SELECT id FROM leads WHERE phone=$1 AND status NOT IN ('closed','compliance_hold') LIMIT 1`,
       [phone]
@@ -85,9 +103,11 @@ async function importHasDataRows(rows, pool) {
 
     await pool.query(
       `INSERT INTO leads (id, name, phone, company, state, city, industry, occupation,
+                          occupation_plural, categories, place_id,
                           insurance_type, source, status, vertical, created_at, updated_at)
-       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, 'life', 'hasdata_maps', 'pending', 'life_fe', NOW(), NOW())`,
-      [name, phone, name, state, city, row.occupation || row.category || null, row.occupation || null]
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+               'life', 'hasdata_maps', 'pending', 'life_fe', NOW(), NOW())`,
+      [name, phone, name, state, city, occupation, occupation, occupationPlural, categories, placeId]
     );
     imported++;
   }
