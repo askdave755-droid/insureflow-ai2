@@ -3,12 +3,14 @@
  * lib/lifePipeline.js - Russell-method life insurance vertical
  * Prompt + transcript fact-find extraction + quotes email + webhook handler.
  * Close chain: fact-find -> Brevo email -> InsureMeNow Direct (IMN_URL).
+ * NOTE: VAPI_LIFE_PROMPT is the source-of-truth copy of the prompt living
+ * on the Vapi life assistant (26722f0a). Branding: Nexus G Partners.
  */
 const { brevoEmail, brevoSMS } = require('./brevo');
 
 const IMN_URL = process.env.IMN_URL || 'https://insuremenowdirect.com/agent/dawudrafael/';
 
-const VAPI_LIFE_PROMPT = `You are Brady with Smart Choice Agents. You specialize in life insurance for {{occupation_plural}}. You are NOT a telemarketer - you are a specialist who quotes {{occupation_plural}} in {{state}}. Your ONLY goal on this call is to get information to send quotes. You are NOT selling anything on this call.
+const VAPI_LIFE_PROMPT = `You are Brady with Nexus G Partners. You specialize in life insurance for {{occupation_plural}}. You are NOT a telemarketer - you are a specialist who quotes {{occupation_plural}} in {{state}}. Your ONLY goal on this call is to get information to send quotes. You are NOT selling anything on this call.
 
 ABSOLUTE RULES:
 - Every sentence out of your mouth is a QUESTION. Never make a statement.
@@ -24,7 +26,7 @@ ABSOLUTE RULES:
 OPENER:
 "Hi, is this {{lead_name}}?"
 [Yes] "This is Brady. Got a minute?"
-[Yes / it depends] "You still a {{occupation}}?"
+[Yes / it depends] "Are you still at {{occupation}}?"
 [Yes] "Good - we specialize in life insurance for {{occupation_plural}}. Who do you have your life insurance with?"
 
 If asked how you got their number: "You're a {{occupation}}, right? {{occupation_plural}} are all we work with. That's how."
@@ -54,7 +56,7 @@ function getLifeScriptVariables(lead) {
   return {
     lead_name: (lead.name || 'there').split(' ')[0],
     occupation: lead.occupation || 'business owner',
-    occupation_plural: lead.occupation_plural || 'business owners',
+    occupation_plural: lead.occupationPlural || 'business owners',
     state: lead.state || '',
     email: lead.email || ''
   };
@@ -97,7 +99,7 @@ function quotesEmailHtml(lead, ff) {
   '<p style="text-align:center;margin:30px 0"><a href="' + IMN_URL + '?src=brady&ref=' + lead.id +
   '" style="background:#f59e0b;color:#0f172a;padding:14px 36px;text-decoration:none;' +
   'font-weight:bold;font-size:16px;border-radius:6px;display:inline-block">SEE MY QUOTES &rarr;</a></p>' +
-  '<p style="font-size:13px;color:#64748b">Smart Choice Agents - Licensed in 20 states - ' +
+  '<p style="font-size:13px;color:#64748b">Nexus G Partners - ' +
   'Questions? Just reply to this email.</p></div></div>';
 }
 
@@ -122,7 +124,7 @@ async function handleLifeCallDone(lead, callData, pool) {
     await pool.query('UPDATE leads SET quote_email_sent=TRUE WHERE id=$1', [lead.id]);
   } else if (ff.age && lead.phone) {
     await brevoSMS(lead.phone,
-      'Brady here (Smart Choice) - great talking today. What is the best email for your quotes? Reply STOP to opt out');
+      'Brady here (Nexus G Partners) - great talking today. What is the best email for your quotes? Reply STOP to opt out');
   }
   return ff;
 }
