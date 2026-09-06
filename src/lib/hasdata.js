@@ -6,11 +6,13 @@
  *   hasdataMapsSearch(query, ll, start) -> raw HasData response rows
  *   importHasDataRows(rows, pool)     -> { imported, skipped }
  *
- * Rows land in leads with vertical='life_fe', occupation=<query>,
- * source='hasdata_maps', status='pending'.
- * Dedupe order: place_id (unique) → phone.
+ * Rows land in leads with vertical='life_fe', source='hasdata_maps',
+ * status='pending'. Occupation niche comes from lib/occupations.js
+ * (Maps categories -> Russell specialty line), falling back to the
+ * scrape query. Dedupe order: place_id (unique) → phone.
  */
 const axios = require('axios');
+const { detectOccupation } = require('./occupations');
 
 const HASDATA_API_KEY = process.env.HASDATA_API_KEY;
 const HASDATA_BASE = 'https://api.hasdata.com/apis/google-maps';
@@ -74,6 +76,8 @@ async function hasdataMapsSearch(query, ll, start = 0) {
 }
 
 // Insert rows into leads (life_fe vertical). Best-effort per row.
+// Niche: detectOccupation(categories, description) from lib/occupations.js;
+// if it lands on the generic fallback, use the scrape query instead.
 // Dedupe on place_id first (Google identity), then phone.
 async function importHasDataRows(rows, pool, query = null) {
   let imported = 0, skipped = 0;
@@ -84,11 +88,16 @@ async function importHasDataRows(rows, pool, query = null) {
 
     const name = row.title || row.name || 'Business Owner';
     const { city, state } = parseCityState(row.address || row.fullAddress);
-    const occupationPlural = query || row.occupation || null;
-    const occupation = occupationPlural ? singularize(occupationPlural) : null;
     const categories = Array.isArray(row.types) ? row.types.join(',')
                      : Array.isArray(row.categories) ? row.categories.join(',')
                      : (row.type || row.category || null);
+
+    // Maps category -> Russell specialty niche (occupation / occupation_plural)
+    const occ = detectOccupation(categories, row.description || row.title || '');
+    const occupation = occ.singular !== 'business owner' ? occ.singular
+                     : (query ? singularize(query) : occ.singular);
+    const occupationPlural = occ.singular !== 'business owner' ? occ.plural
+                     : (query || occ.plural);
 
     // Dedupe: place_id first
     if (placeId) {
