@@ -3,8 +3,6 @@
  * lib/lifePipeline.js - Russell-method life insurance vertical
  * Prompt + transcript fact-find extraction + quotes email + webhook handler.
  * Close chain: fact-find -> Brevo email -> InsureMeNow Direct (IMN_URL).
- * NOTE: VAPI_LIFE_PROMPT is the source-of-truth copy of the prompt living
- * on the Vapi life assistant (26722f0a). Branding: Nexus G Partners.
  */
 const { brevoEmail, brevoSMS } = require('./brevo');
 
@@ -26,7 +24,7 @@ ABSOLUTE RULES:
 OPENER:
 "Hi, is this {{lead_name}}?"
 [Yes] "This is Brady. Got a minute?"
-[Yes / it depends] "Are you still at {{occupation}}?"
+[Yes / it depends] "You still a {{occupation}}?"
 [Yes] "Good - we specialize in life insurance for {{occupation_plural}}. Who do you have your life insurance with?"
 
 If asked how you got their number: "You're a {{occupation}}, right? {{occupation_plural}} are all we work with. That's how."
@@ -56,33 +54,108 @@ function getLifeScriptVariables(lead) {
   return {
     lead_name: (lead.name || 'there').split(' ')[0],
     occupation: lead.occupation || 'business owner',
-    occupation_plural: lead.occupationPlural || 'business owners',
+    occupation_plural: lead.occupation_plural || 'business owners',
     state: lead.state || '',
     email: lead.email || ''
   };
+}
+
+// Split a transcript into user-spoken lines only. The fact-find answers
+// live in User turns; AI turns contain the questions (and would false-
+// positive the extractors, e.g. "Taking any medications?").
+function userLines(transcript) {
+  return transcript.split('\n')
+    .filter(l => /^(user|customer|human):/i.test(l))
+    .map(l => l.replace(/^(user|customer|human):/i, '').trim());
+}
+
+// The user answer that immediately follows an AI question matching `qRe`.
+function answerAfter(transcript, qRe) {
+  const lines = transcript.split('\n');
+  for (let i = 0; i < lines.length - 1; i++) {
+    if (/^(ai|bot|assistant):/i.test(lines[i]) && qRe.test(lines[i])) {
+      const m = lines[i + 1].match(/^(?:user|customer|human):\s*(.+)$/i);
+      if (m) return m[1].trim();
+    }
+  }
+  return null;
 }
 
 function extractFactFind(transcript) {
   if (!transcript) return {};
   const t = transcript.toLowerCase();
   const ff = {};
-  const ageM = t.match(/(?:i'?m |age |i am )(\d{2})\b/) || t.match(/\b(\d{2})\s*(?:years old|yrs)/);
-  if (ageM) ff.age = parseInt(ageM[1]);
-  if (/(don'?t smoke|do not smoke|non[- ]?smok|never smoked)/.test(t)) ff.smoker = false;
-  else if (/\b(smoke|smoker|vape|chew|tobacco)\b/.test(t) && /(yes|yeah|i do)/.test(t)) ff.smoker = true;
-  const medM = transcript.match(/taking ([^.\n]{3,80})/i);
-  if (medM) ff.medications = medM[1].trim();
-  const premM = transcript.match(/\$?\s?(\d{2,4})\s*(?:a month|\/mo|per month|monthly)/i);
+  const uLines = userLines(transcript);
+  const uText = uLines.join('\n').toLowerCase();
+
+  // AGE — answer to "how old are you?" first (bare "48" is the norm),
+  // then free-form mentions inside user turns.
+  const ageAns = answerAfter(transcript, /how old are you/i);
+  let ageM = ageAns && ageAns.match(/(\d{2})/);
+  if (!ageM) ageM = uText.match(/(?:i'?m |i am |age )(\d{2})\b/) || uText.match(/\b(\d{2})\s*(?:years old|yrs)/);
+  if (ageM) {
+    const a = parseInt(ageM[1]);
+    if (a >= 18 && a <= 99) ff.age = a;
+  }
+
+  // TOBACCO — keyed to the answer after "you smoke?", not loose "yeah"
+  // elsewhere in the call (early yeses answer "got a minute?").
+  const smokeAns = (answerAfter(transcript, /you smoke|do you smoke|any tobacco/i) || '').toLowerCase();
+  if (/\b(no|nope|nah|never|quit|not anymore)\b/.test(smokeAns) || /(don'?t smoke|do not smoke|non[- ]?smok|never smoked)/.test(uText)) ff.smoker = false;
+  else if (/\b(yes|yeah|yep|i do|sometimes)\b/.test(smokeAns)) ff.smoker = true;
+
+  // MEDICATIONS — only from user turns, never the AI's question line.
+  const medAns = answerAfter(transcript, /what are you taking|what medicines/i);
+  if (medAns && !/\b(no|none|nothing|not sure|nope)\b/i.test(medAns)) {
+    ff.medications = medAns.replace(/[.?!]+$/, '').trim();
+  } else {
+    const medM = uText.match(/(?:taking|on|take) ([^.\n]{3,80})/);
+    if (medM && !/\b(no|none|nothing)\b/.test(medM[1])) ff.medications = medM[1].trim();
+    else {
+      const cond = uText.match(/(blood pressure|diabetes|diabetic|insulin|cholesterol|metformin|lisinopril)/i);
+      if (cond) ff.medications = cond[1];
+    }
+  }
+
+  // MONTHLY PREMIUM — answer after "how much you paying" / "want to pay".
+  const payAns = answerAfter(transcript, /how much.*(paying|pay)|what.*pay/i);
+  let premM = payAns && payAns.match(/\$?\s?(\d{2,4})/);
+  if (!premM) premM = transcript.match(/\$?\s?(\d{2,4})\s*(?:a month|\/mo|per month|monthly)/i);
   if (premM) ff.monthly_premium = parseInt(premM[1]);
-  const covM = transcript.match(/\$?(\d{3}(?:,\d{3})*)\s*(?:k\b|thousand)?\s*(?:of |in )?(?:coverage|life insurance)/i)
-            || transcript.match(/\b(\d{3})\s*k\b/i);
+
+  // COVERAGE — answer after "how much coverage", then free-form $ amounts.
+  const covAns = answerAfter(transcript, /how much coverage/i);
+  let covM = covAns && covAns.match(/\$?\s?(\d{1,3}(?:,?\d{3})*)\s*(k\b|thousand|million)?/i);
+  if (!covM) {
+    covM = transcript.match(/\$?(\d{3}(?:,\d{3})*)\s*(?:k\b|thousand)?\s*(?:of |in )?(?:coverage|life insurance)/i)
+        || transcript.match(/\b(\d{3})\s*k\b/i);
+  }
   if (covM) {
     let v = parseInt(covM[1].replace(/,/g, ''));
-    if (v < 1000) v *= 1000;
-    ff.coverage_amount = v;
+    const suffix = (covM[2] || '').toLowerCase();
+    if (suffix.startsWith('million')) v *= 1000000;
+    else if (suffix.startsWith('k') || suffix.startsWith('thousand') || v < 1000) v *= 1000;
+    if (v >= 1000) ff.coverage_amount = v;
   }
-  const emailM = transcript.match(/[\w.+-]+@[\w-]+\.[\w.]+/);
-  if (emailM) ff.email = emailM[0];
+
+  // EMAIL — STT mangles dictation ("Send it to. Ask. Dave7. 55@gmail.com").
+  // Take the user line containing '@', strip filler words, join every alnum
+  // token before the '@' into the local part, and clean the domain.
+  const emailLine = uLines.find(l => l.includes('@')) || '';
+  const emailM = emailLine.match(/([\w.\s+-]+)@\s*([\w\s.-]+)/);
+  if (emailM) {
+    const FILLER = new Set(['send','it','to','my','email','is','the','best','at','me']);
+    const tokens = emailM[1].match(/[a-zA-Z0-9]+/g) || [];
+    while (tokens.length && FILLER.has(tokens[0].toLowerCase())) tokens.shift();
+    const local = tokens.join('').toLowerCase();
+    const domClean = emailM[2].replace(/\s+/g, '').toLowerCase()
+      .replace(/[^a-z0-9.]/g, '').replace(/\.{2,}/g, '.').replace(/\.$/, '');
+    if (local && /\.[a-z]{2,}$/.test(domClean)) ff.email = local + '@' + domClean;
+  }
+  if (!ff.email) {
+    const loose = transcript.match(/[\w.+-]+@[\w-]+\.[\w.]+/);
+    if (loose) ff.email = loose[0].replace(/\.$/, '');
+  }
   return ff;
 }
 
