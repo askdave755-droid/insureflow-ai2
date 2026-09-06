@@ -1,9 +1,10 @@
 const { callQueue } = require('../queue');
 const prisma = require('../db');
+const pool = require('../lib/pool');
 const { makeCall, isLifeLead } = require('../lib/vapi');
 const { isBusinessHours, getNextBusinessTime } = require('../lib/validate');
 const { analyzeCall } = require('../lib/qualify');
-const { analyzeLifeCall, sendLifeFollowUp } = require('../lib/life');
+const { handleLifeCallDone } = require('../lib/lifePipeline');
 const { handleCallOutcome, createTask } = require('../lib/followup');
 
 callQueue.process('make-call', 3, async (job) => {
@@ -80,78 +81,6 @@ callQueue.process('make-call', 3, async (job) => {
 
 console.log('👷 Call worker registered on queue: vapi-calls (job: make-call, concurrency: 3)');
 
-// ─── LIFE OUTCOME HANDLER ───
-// Russell-method fact-find path: fact-find fields live directly on the
-// Lead row (age, smoker, medications, monthly_premium, coverage_amount).
-// Qualified = interested/booked + score >= 50.
-// Money path: Brevo SMS/email with InsureMeNow link + hot task for Dave.
-async function handleLifeOutcome(lead, analysis, actor = 'system') {
-  const { disposition, qualified, factFind, ffScore } = analysis;
-  const label = `${lead.company || lead.name} (${lead.id})`;
-
-  // Map extraction onto the Lead fact-find columns (original schema)
-  const ffUpdates = {};
-  if (factFind.age) ffUpdates.age = factFind.age;
-  if (factFind.tobacco !== undefined) ffUpdates.smoker = factFind.tobacco;
-  if (factFind.healthFlags && factFind.healthFlags.length) ffUpdates.medications = factFind.healthFlags.join(',');
-  if (factFind.coverageGoal) ffUpdates.coverageAmount = factFind.coverageGoal;
-  if (factFind.monthlyBudget) ffUpdates.monthlyPremium = factFind.monthlyBudget;
-  if (factFind.email && !lead.email) ffUpdates.email = factFind.email;
-
-  const updates = { lastDisposition: disposition, ...ffUpdates };
-
-  // DNC still routes through the shared compliance path
-  if (disposition === 'dnc') {
-    const { addToDnc } = require('../lib/compliance');
-    await addToDnc({ phone: lead.phone, email: lead.email, reason: 'Verbal opt-out during call', source: 'call_opt_out' }, actor);
-    updates.status = 'compliance_hold';
-    updates.complianceStatus = 'blocked';
-    updates.complianceNotes = 'DNC — verbal opt-out captured on call';
-  } else if (qualified) {
-    updates.status = 'qualified';
-    updates.qualified = true;
-    updates.qualifiedAt = new Date();
-  } else if (disposition === 'not_interested') {
-    updates.status = 'closed';
-  } else if (disposition === 'no_answer' && (lead.callAttempts || 0) >= 3) {
-    updates.status = 'nurture';
-  } else if (disposition === 'no_answer' || disposition === 'callback') {
-    const retryAt = getNextBusinessTime(lead.state);
-    updates.status = 'scheduled';
-    updates.scheduledCallAt = retryAt;
-    await callQueue.add('make-call', { leadId: lead.id }, {
-      delay: Math.max(retryAt - Date.now(), 60000),
-      priority: 10
-    });
-  } else {
-    updates.status = 'called';
-  }
-
-  await prisma.lead.update({ where: { id: lead.id }, data: updates });
-  if (Object.keys(ffUpdates).length) {
-    console.log(`📋 Fact-find saved on lead ${label}: score ${ffScore} (${Object.keys(ffUpdates).join(', ')})`);
-  }
-
-  // Qualified money path: InsureMeNow link via Brevo + hot task for Dave
-  if (qualified) {
-    try {
-      await sendLifeFollowUp({ ...lead, ...updates }, factFind);
-    } catch (err) {
-      console.warn(`⚠️ Life follow-up messaging failed for ${label}: ${err.message}`);
-    }
-    await createTask({
-      leadId: lead.id,
-      type: 'REVIEW',
-      title: `💚 Life fact-find complete: ${lead.name} — ${factFind.coverageGoal ? `$${factFind.coverageGoal.toLocaleString()} goal` : 'coverage TBD'}${factFind.age ? `, age ${factFind.age}` : ''}${factFind.tobacco ? ' (tobacco)' : ''}`,
-      notes: `FF score: ${ffScore} | Occ: ${lead.occupation || lead.industry || '?'} | Existing: ${factFind.existingCoverage || 'unknown'} | InsureMeNow link sent via SMS${(factFind.email || lead.email) ? ' + email' : ''}`,
-      dueAt: new Date(Date.now() + 3600000),
-      priority: ffScore >= 70 ? 'hot' : 'high'
-    });
-  }
-
-  return { disposition, qualified, updates, factFind, ffScore };
-}
-
 // ─── WEBHOOK HANDLER (called from routes) ───
 async function handleVapiWebhook(webhookData) {
   const message = webhookData.message || {};
@@ -200,11 +129,67 @@ async function handleVapiWebhook(webhookData) {
     return { error: 'lead not found', leadId: callLog.leadId };
   }
 
-  const life = isLifeLead(lead);
+  // ══════════════════════════════════════════════════════════════
+  // LIFE path — original Russell pipeline (lib/lifePipeline.js):
+  // extractFactFind -> UPDATE leads fact-find columns -> Brevo
+  // quotes email (InsureMeNow Direct link) or email-capture SMS.
+  // Qualified = email + age captured.
+  // ══════════════════════════════════════════════════════════════
+  if (isLifeLead(lead)) {
+    const ff = await handleLifeCallDone(lead, { transcript, summary }, pool);
+    const qualified = !!(ff.email && ff.age);
+    const disposition = qualified ? 'qualified' : (duration !== null && duration < 20 ? 'no_answer' : 'completed');
 
-  const analysis = life
-    ? analyzeLifeCall({ transcript, summary, successEvaluation, duration })
-    : analyzeCall({ transcript, summary, successEvaluation, duration });
+    await prisma.callLog.update({
+      where: { id: callLog.id },
+      data: {
+        status: message.call?.status || 'ended',
+        duration,
+        transcript,
+        summary,
+        qualified,
+        disposition,
+        recordingUrl
+      }
+    });
+    await prisma.lead.update({
+      where: { id: lead.id },
+      data: { lastDisposition: disposition }
+    });
+
+    // Verbal opt-out still routes through the shared DNC engine
+    if (/\b(do[- ]not[- ]call|remove me (from|off)|stop calling|take me off)\b/i.test(transcript || '')) {
+      const { addToDnc } = require('../lib/compliance');
+      await addToDnc({ phone: lead.phone, email: lead.email, reason: 'Verbal opt-out during call', source: 'call_opt_out' }, 'webhook:vapi');
+      await prisma.lead.update({
+        where: { id: lead.id },
+        data: { status: 'compliance_hold', complianceStatus: 'blocked', complianceNotes: 'DNC — verbal opt-out captured on call' }
+      });
+      console.log(`🚫 DNC [LIFE]: ${lead.name}`);
+      return { qualified: false, disposition: 'dnc', leadId: lead.id, vertical: 'life_fe', factFind: ff };
+    }
+
+    if (qualified) {
+      await createTask({
+        leadId: lead.id,
+        type: 'REVIEW',
+        title: `💚 Life quotes sent: ${lead.name} — ${ff.coverage_amount ? `$${ff.coverage_amount.toLocaleString()}` : 'coverage TBD'}${ff.age ? `, age ${ff.age}` : ''}${ff.smoker ? ' (tobacco)' : ''}`,
+        notes: `Occ: ${lead.occupation || lead.industry || '?'} | Premium: ${ff.monthly_premium ? `$${ff.monthly_premium}/mo` : '?'} | Meds: ${ff.medications || 'none noted'} | Quotes email → ${ff.email}`,
+        dueAt: new Date(Date.now() + 3600000),
+        priority: 'hot'
+      });
+      console.log(`🔥 QUALIFIED [LIFE]: ${lead.name} — quotes emailed to ${ff.email}`);
+    } else {
+      console.log(`📞 Life outcome: ${lead.name} → ${disposition}`);
+    }
+
+    return { qualified, disposition, leadId: lead.id, vertical: 'life_fe', factFind: ff };
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // COMMERCIAL path (unchanged)
+  // ══════════════════════════════════════════════════════════════
+  const analysis = analyzeCall({ transcript, summary, successEvaluation, duration });
 
   await prisma.callLog.update({
     where: { id: callLog.id },
@@ -219,12 +204,10 @@ async function handleVapiWebhook(webhookData) {
     }
   });
 
-  const outcome = life
-    ? await handleLifeOutcome(lead, analysis, 'webhook:vapi')
-    : await handleCallOutcome(lead, analysis, 'webhook:vapi');
+  const outcome = await handleCallOutcome(lead, analysis, 'webhook:vapi');
 
   if (outcome.qualified) {
-    console.log(`🔥 QUALIFIED ${life ? '[LIFE]' : ''} (${outcome.disposition}): ${lead.name} (${lead.company})${life ? ` — FF score ${outcome.ffScore}` : ''}`);
+    console.log(`🔥 QUALIFIED (${outcome.disposition}): ${lead.name} (${lead.company})`);
   } else {
     console.log(`📞 Outcome: ${lead.name} → ${outcome.disposition} (status: ${outcome.updates.status})`);
   }
@@ -233,8 +216,8 @@ async function handleVapiWebhook(webhookData) {
     qualified: outcome.qualified,
     disposition: outcome.disposition,
     leadId: lead.id,
-    vertical: life ? 'life_fe' : 'commercial_auto',
-    ...(life ? { factFind: outcome.factFind, ffScore: outcome.ffScore } : { extracted: analysis.intel })
+    vertical: 'commercial_auto',
+    extracted: analysis.intel
   };
 }
 

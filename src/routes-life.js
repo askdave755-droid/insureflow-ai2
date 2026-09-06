@@ -9,9 +9,23 @@ const prisma = require('./db');
 const { callQueue } = require('./queue');
 const { CITY_COORDS, hasdataMapsSearch, importHasDataRows } = require('./lib/hasdata');
 const { formatPhoneE164 } = require('./lib/validate');
-const { sendLifeFollowUp, factFindScore } = require('./lib/life');
+const { quotesEmailHtml } = require('./lib/lifePipeline');
+const { brevoEmail, brevoSMS } = require('./lib/brevo');
 const { requireAdminKey } = require('./lib/auth');
 const config = require('./config');
+
+// Russell completeness score (reference weights): age 25, tobacco 20,
+// coverage 25, meds 10, premium 10, email 20 (max 100).
+function factFindScore(l) {
+  let s = 0;
+  if (l.age) s += 25;
+  if (l.smoker !== null && l.smoker !== undefined) s += 20;
+  if (l.coverageAmount) s += 25;
+  if (l.medications) s += 10;
+  if (l.monthlyPremium) s += 10;
+  if (l.email) s += 20;
+  return Math.min(s, 100);
+}
 
 function attachLifeRoutes(app, pool) {
   // Manual scrape trigger (Phase 1): POST /api/scraper/hasdata/run
@@ -153,16 +167,7 @@ function attachLifeRoutes(app, pool) {
       }
     });
     const scored = leads
-      .map(l => ({
-        ...l,
-        score: factFindScore({
-          age: l.age,
-          tobacco: l.smoker,
-          coverageGoal: l.coverageAmount,
-          monthlyBudget: l.monthlyPremium,
-          healthFlags: l.medications ? l.medications.split(',') : undefined
-        })
-      }))
+      .map(l => ({ ...l, score: factFindScore(l) }))
       .filter(l => l.score >= parseInt(minScore));
     res.json(scored);
   });
@@ -184,28 +189,34 @@ function attachLifeRoutes(app, pool) {
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
 
     const updated = await prisma.lead.update({ where: { id: lead.id }, data: parsed.data });
-    res.json({
-      success: true,
-      lead: updated,
-      score: factFindScore({
-        age: updated.age, tobacco: updated.smoker,
-        coverageGoal: updated.coverageAmount, monthlyBudget: updated.monthlyPremium
-      })
-    });
+    res.json({ success: true, lead: updated, score: factFindScore(updated) });
   });
 
-  // Re-send InsureMeNow quote link: POST /api/life/factfind/:leadId/resend
+  // Re-send InsureMeNow Direct quote link: POST /api/life/factfind/:leadId/resend
   app.post('/api/life/factfind/:leadId/resend', requireAdminKey, async (req, res) => {
     const lead = await prisma.lead.findUnique({ where: { id: req.params.leadId } });
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
-    await sendLifeFollowUp(lead, {
+
+    const ff = {
       age: lead.age,
-      tobacco: lead.smoker,
-      coverageGoal: lead.coverageAmount,
-      monthlyBudget: lead.monthlyPremium,
+      smoker: lead.smoker,
+      medications: lead.medications,
+      monthly_premium: lead.monthlyPremium,
+      coverage_amount: lead.coverageAmount,
       email: lead.email
-    });
-    res.json({ success: true, sentTo: { phone: lead.phone, email: lead.email } });
+    };
+
+    if (lead.email) {
+      await brevoEmail(lead.email,
+        (lead.name || '').split(' ')[0] + ', your life insurance quotes are ready',
+        quotesEmailHtml(lead, ff));
+      await prisma.lead.update({ where: { id: lead.id }, data: { quoteEmailSent: true } });
+      res.json({ success: true, channel: 'email', sentTo: lead.email });
+    } else {
+      await brevoSMS(lead.phone,
+        'Brady here (Smart Choice) - what is the best email for your quotes? Reply STOP to opt out');
+      res.json({ success: true, channel: 'sms', sentTo: lead.phone });
+    }
   });
 }
 

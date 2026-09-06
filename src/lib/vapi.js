@@ -65,16 +65,17 @@ function commercialVariables(lead) {
   };
 }
 
+// Life variables — original script variables from lib/lifePipeline.js
+// (lead_name, occupation, occupation_plural, state, email) plus the
+// InsureMeNow Direct link used by the close chain.
 function lifeVariables(lead) {
-  const { getLifeOpener } = require('./life');
+  const { getLifeScriptVariables, IMN_URL } = require('./lifePipeline');
   return {
-    lead_name: lead.name.split(' ')[0],
+    ...getLifeScriptVariables(lead),
     full_name: lead.name,
     company: lead.company || 'your business',
     occupation: lead.occupation || lead.industry || lead.title || 'business owner',
-    natural_opener: getLifeOpener(lead),
-    insuremenow_link: config.INSUREMENOW_LINK,
-    state: lead.state,
+    insuremenow_link: config.INSUREMENOW_LINK || IMN_URL,
     time_commitment: '2 minutes'
   };
 }

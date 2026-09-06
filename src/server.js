@@ -4,6 +4,7 @@ const rateLimit = require('express-rate-limit');
 const config = require('./config');
 const routes = require('./routes');
 const prisma = require('./db');
+const pool = require('./lib/pool');
 const { attachCarrierRoutes } = require('./routes-carrier');
 const { attachLifeRoutes } = require('./routes-life');
 require('./orchestrator');
@@ -40,14 +41,8 @@ app.use(express.static('public'));
 // Routes
 app.use(routes);
 
-// Carrier routes expect a pg-style pool; shim it over Prisma
-// ($queryRawUnsafe supports $1 positional params used by routes-carrier).
-const pool = {
-  query: async (sql, params) => ({ rows: await prisma.$queryRawUnsafe(sql, ...(params || [])) })
-};
+// Carrier + Life routes expect a pg-style pool (shared shim in lib/pool.js)
 attachCarrierRoutes(app, pool);
-
-// Life vertical routes (same pg-shim pattern as carrier routes)
 attachLifeRoutes(app, pool);
 
 // Error handler
