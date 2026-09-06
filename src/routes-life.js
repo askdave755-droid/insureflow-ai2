@@ -173,14 +173,15 @@ function attachLifeRoutes(app, pool) {
   });
 
   // Manual fact-find entry/edit: POST /api/life/factfind/:leadId
-  // { age?, smoker?, medications?, coverageAmount?, monthlyPremium? }
+  // { age?, smoker?, medications?, coverageAmount?, monthlyPremium?, email? }
   app.post('/api/life/factfind/:leadId', requireAdminKey, async (req, res) => {
     const schema = z.object({
       age: z.number().min(18).max(85).optional(),
       smoker: z.boolean().optional(),
       medications: z.string().optional(),
       coverageAmount: z.number().optional(),
-      monthlyPremium: z.number().optional()
+      monthlyPremium: z.number().optional(),
+      email: z.string().email().optional()
     });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error });
@@ -214,7 +215,7 @@ function attachLifeRoutes(app, pool) {
       res.json({ success: true, channel: 'email', sentTo: lead.email });
     } else {
       await brevoSMS(lead.phone,
-        'Brady here (Smart Choice) - what is the best email for your quotes? Reply STOP to opt out');
+        'Brady here (Nexus G Partners) - what is the best email for your quotes? Reply STOP to opt out');
       res.json({ success: true, channel: 'sms', sentTo: lead.phone });
     }
   });
