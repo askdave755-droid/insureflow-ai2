@@ -71,7 +71,7 @@ function lifeVariables(lead) {
     lead_name: lead.name.split(' ')[0],
     full_name: lead.name,
     company: lead.company || 'your business',
-    occupation: lead.industry || lead.title || 'business owner',
+    occupation: lead.occupation || lead.industry || lead.title || 'business owner',
     natural_opener: getLifeOpener(lead),
     insuremenow_link: config.INSUREMENOW_LINK,
     state: lead.state,

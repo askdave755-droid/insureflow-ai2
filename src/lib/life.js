@@ -12,7 +12,7 @@ const config = require('../config');
 // No renewal hook (life has no X-date) — lead with occupation context.
 function getLifeOpener(lead) {
   const firstName = (lead.name || 'there').split(' ')[0];
-  const occupation = lead.industry || lead.title || null;
+  const occupation = lead.occupation || lead.industry || lead.title || null;
   const company = lead.company || null;
 
   const occLine = occupation
@@ -36,8 +36,8 @@ function extractLifeFactFind(transcript = '', summary = '') {
   const ff = {};
 
   // Age: "I'm 45" / "45 years old" / "age 45"
-  let m = lower.match(/(?:i'?m|i am|age[d]?|about)\s*(\d{2})\s*(?:years? old|y/?o)?/) ||
-          lower.match(/\b(\d{2})\s*(?:years? old|y/?o)\b/);
+  let m = lower.match(/(?:i'?m|i am|age[d]?|about)\s*(\d{2})\s*(?:years? old|y\/?o)?/) ||
+          lower.match(/\b(\d{2})\s*(?:years? old|y\/?o)\b/);
   if (m) {
     const age = parseInt(m[1], 10);
     if (age >= 18 && age <= 85) ff.age = age;
@@ -139,6 +139,7 @@ function analyzeLifeCall({ transcript = '', summary = '', successEvaluation, dur
 // ─── FOLLOW-UP MESSAGING (Brevo) ───
 async function sendLifeFollowUp(lead, factFind) {
   const { sendSMS, sendEmail } = require('./messaging');
+  const prisma = require('../db');
   const firstName = (lead.name || 'there').split(' ')[0];
   const link = config.INSUREMENOW_LINK;
 
@@ -173,30 +174,13 @@ async function sendLifeFollowUp(lead, factFind) {
     await sendEmail(toEmail, `Your life insurance rates are ready, ${firstName}`, html,
       `Hi ${firstName}, see your rates here: ${link}`);
   }
-}
 
-// ─── HASDATA MAPS CATEGORIES SOURCE ───
-// Pull small-biz owners by occupation category in licensed states.
-const HASDATA_BASE = 'https://api.hasdata.com/apis/google-maps';
-
-async function scrapeOccupation({ category, city, state, limit = 20 }) {
-  if (!config.HASDATA_API_KEY) throw new Error('HASDATA_API_KEY not set');
-  const query = `${category} in ${city}, ${state}`;
-  const resp = await axios.get(`${HASDATA_BASE}/search`, {
-    params: { q: query, ll: `@${city},${state}` },
-    headers: { 'x-api-key': config.HASDATA_API_KEY },
-    timeout: 30000
-  });
-  const results = resp.data?.localResults || resp.data?.data || [];
-  return results.slice(0, limit).map(r => ({
-    name: r.title || r.name,
-    phone: r.phone || r.phoneNumber,
-    address: r.address || r.fullAddress,
-    website: r.website,
-    rating: r.rating,
-    reviews: r.reviews,
-    category
-  }));
+  // Mark quote email sent (feeds /api/life/stats `emailed` column)
+  try {
+    await prisma.lead.update({ where: { id: lead.id }, data: { quoteEmailSent: true } });
+  } catch (e) {
+    console.warn('⚠️ quote_email_sent flag failed:', e.message);
+  }
 }
 
 module.exports = {
@@ -204,6 +188,5 @@ module.exports = {
   extractLifeFactFind,
   factFindScore,
   analyzeLifeCall,
-  sendLifeFollowUp,
-  scrapeOccupation
+  sendLifeFollowUp
 };
