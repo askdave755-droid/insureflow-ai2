@@ -61,7 +61,8 @@ function commercialVariables(lead) {
     time_commitment: '4 minutes',
     wc_available: config.STATE_CONFIG[lead.state]?.wcAvailable ? 'true' : 'false',
     state: lead.state,
-    industry_focus: config.STATE_CONFIG[lead.state]?.vertical || 'commercial_auto'
+    industry_focus: config.STATE_CONFIG[lead.state]?.vertical || 'commercial_auto',
+    lead_email: lead.email || ''
   };
 }
 
