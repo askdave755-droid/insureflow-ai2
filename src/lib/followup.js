@@ -150,6 +150,11 @@ async function handleCallOutcome(lead, analysis, actor = 'system') {
       console.warn(`⚠️ Qualified follow-up messaging failed for ${label}: ${err.message}`);
     }
     try {
+      await prisma.lead.update({ where: { id: lead.id }, data: { quoteEmailSent: true } });
+    } catch (err) {
+      console.warn(`⚠️ quoteEmailSent flag failed for ${label}: ${err.message}`);
+    }
+    try {
       const { account, opportunity } = await promoteLead(lead.id, actor);
       task = await createTask({
         leadId: lead.id,
