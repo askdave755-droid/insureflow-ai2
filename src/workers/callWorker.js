@@ -190,6 +190,11 @@ async function handleVapiWebhook(webhookData) {
   // COMMERCIAL path (unchanged)
   // ══════════════════════════════════════════════════════════════
   const analysis = analyzeCall({ transcript, summary, successEvaluation, duration });
+  // Fallback: if lead has no email, pull one spoken on the call from the transcript
+  if (!lead.email) {
+    const m = (transcript || '').match(/([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/i);
+    if (m) analysis.intel = { ...(analysis.intel || {}), email: m[1].toLowerCase() };
+  }
 
   await prisma.callLog.update({
     where: { id: callLog.id },
