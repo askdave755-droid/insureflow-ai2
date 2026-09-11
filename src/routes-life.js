@@ -30,7 +30,7 @@ function factFindScore(l) {
 function attachLifeRoutes(app, pool) {
   // Manual scrape trigger (Phase 1): POST /api/scraper/hasdata/run
   // Body: { "query": "barbershops", "city": "Detroit, MI", "start": 0 }
-  app.post('/api/scraper/hasdata/run', async (req, res) => {
+  app.post('/api/scraper/hasdata/run', requireAdminKey, async (req, res) => {
     const { query, city, start } = req.body;
     if (!query || !city) return res.status(400).json({ error: 'query and city required' });
     const ll = CITY_COORDS[city.toLowerCase().trim()];
@@ -47,7 +47,7 @@ function attachLifeRoutes(app, pool) {
   });
 
   // Optional: no-code scraper product webhook (not needed for direct API, kept for later)
-  app.post('/api/scraper/hasdata', async (req, res) => {
+  app.post('/api/scraper/hasdata', requireAdminKey, async (req, res) => {
     const rows = req.body?.results || (Array.isArray(req.body) ? req.body : [req.body]);
     const stats = await importHasDataRows(rows, pool, req.body?.query || null);
     console.log('HasData webhook: ' + stats.imported + ' imported, ' + stats.skipped + ' skipped');
@@ -55,7 +55,7 @@ function attachLifeRoutes(app, pool) {
   });
 
   // Dashboard helper: per-niche conversion stats
-  app.get('/api/life/stats', async (req, res) => {
+  app.get('/api/life/stats', requireAdminKey, async (req, res) => {
     const r = await pool.query(
       `SELECT occupation, COUNT(*) AS total,
               SUM(CASE WHEN status='called' THEN 1 ELSE 0 END) AS called,
@@ -214,14 +214,14 @@ function attachLifeRoutes(app, pool) {
         first + ', your life insurance quotes are ready',
         quotesEmailHtml(lead, ff));
       await brevoSMS(lead.phone,
-        first + ', Brady here (Nexus G Partners) - your quotes are in your inbox (' + lead.email +
+        first + ', Brady here (David Hughes Insurance) - your quotes are in your inbox (' + lead.email +
         '). Or see rates in 90 seconds here: ' + IMN_URL + '?src=brady-sms&ref=' + lead.id +
         ' Reply STOP to opt out');
       await prisma.lead.update({ where: { id: lead.id }, data: { quoteEmailSent: true } });
       res.json({ success: true, channel: 'email+sms', sentTo: lead.email, smsTo: lead.phone });
     } else {
       await brevoSMS(lead.phone,
-        'Brady here (Nexus G Partners) - what is the best email for your quotes? Reply STOP to opt out');
+        'Brady here (David Hughes Insurance) - what is the best email for your quotes? Reply STOP to opt out');
       res.json({ success: true, channel: 'sms', sentTo: lead.phone });
     }
   });
@@ -241,7 +241,7 @@ function attachLifeRoutes(app, pool) {
         const r = await axios.post('https://api.brevo.com/v3/transactionalSMS/sms', {
           sender: out.sender,
           recipient: to,
-          content: 'Test from Nexus G Partners - your quotes link works. Reply STOP to opt out',
+          content: 'Test from David Hughes Insurance - your quotes link works. Reply STOP to opt out',
           type: 'transactional'
         }, { headers: { 'api-key': key, 'Content-Type': 'application/json' } });
         out.sent = r.data;
