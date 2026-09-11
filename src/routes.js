@@ -81,7 +81,7 @@ router.get('/test-email', requireAdminKey, async (req, res) => {
     const html = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #1a1a1a;">
         <div style="background: linear-gradient(135deg, #1e3a5f 0%, #2d5a87 100%); padding: 30px; text-align: center;">
-          <h1 style="color: #fff; margin: 0; font-size: 24px;">Nexus G Partners</h1>
+          <h1 style="color: #fff; margin: 0; font-size: 24px;">David Hughes Insurance</h1>
           <p style="color: #e0e0e0; margin: 10px 0 0;">Brevo Integration Test</p>
         </div>
         <div style="padding: 30px; background: #fff;">
@@ -110,7 +110,7 @@ router.get('/test-email', requireAdminKey, async (req, res) => {
 });
 
 // ─── ADD SINGLE LEAD ───
-router.post('/api/leads', async (req, res) => {
+router.post('/api/leads', requireAdminKey, async (req, res) => {
   const schema = z.object({
     name: z.string().min(2),
     phone: z.string(),
@@ -196,7 +196,7 @@ router.get('/test-call/:phone', requireAdminKey, async (req, res) => {
 });
 
 // ─── GET LEADS ───
-router.get('/api/leads', async (req, res) => {
+router.get('/api/leads', requireAdminKey, async (req, res) => {
   const { status, state, limit = 50 } = req.query;
   
   const where = {};
