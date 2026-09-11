@@ -1,7 +1,7 @@
 // ============================================
 // SMS / EMAIL MESSAGING - BREVO ONLY
 // src/lib/messaging.js
-// Nexus G Partners branding (replaces Smart Choice)
+// David Hughes Insurance branding (replaces Smart Choice)
 // TFN: +1 (866) 505-6792 (approved 09/04/2026)
 // ============================================
 
@@ -53,7 +53,7 @@ async function sendEmail(to, subject, html, text) {
     const response = await axios.post(
       'https://api.brevo.com/v3/smtp/email',
       {
-        sender: { name: 'Brady @ Nexus G Partners', email: EMAIL_FROM },
+        sender: { name: 'Brady @ David Hughes Insurance', email: EMAIL_FROM },
         to: [{ email: to }],
         subject,
         htmlContent: html,
@@ -80,7 +80,7 @@ async function sendQualificationFollowUp(lead, carrierNames) {
   const company = lead.company || 'your business';
 
   // Carrier-compliant: express verbal consent captured on the call, STOP language required for US toll-free/10DLC
-  const smsBody = `${firstName}, Brady here from Nexus G Partners. I found options for ${company} through ${carrierNames}. Grab a time: ${CALENDLY_LINK} Reply STOP to opt out.`;
+  const smsBody = `${firstName}, Brady here from David Hughes Insurance. I found options for ${company} through ${carrierNames}. Grab a time: ${CALENDLY_LINK} Reply STOP to opt out.`;
   await sendSMS(lead.phone, smsBody);
 
   if (lead.email) {
@@ -91,7 +91,7 @@ async function sendQualificationFollowUp(lead, carrierNames) {
         <p>I've identified the best carriers for your risk profile: <strong>${carrierNames}</strong>.</p>
         <p>Let's lock in a 15-minute comparison:</p>
         <a href="${CALENDLY_LINK}" style="display:inline-block;background:#f59e0b;color:#0f172a;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:700;">Book My Call</a>
-        <p style="margin-top:24px;font-size:13px;color:#64748b;">Brady | Nexus G Partners</p>
+        <p style="margin-top:24px;font-size:13px;color:#64748b;">Brady | David Hughes Insurance</p>
       </div>
     `;
     await sendEmail(lead.email, `Insurance options ready for ${company}`, html, `Hi ${firstName}, I've identified carriers for ${company}: ${carrierNames}. Book here: ${CALENDLY_LINK}`);

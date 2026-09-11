@@ -85,7 +85,7 @@ function getNaturalOpener(lead) {
   const openers = [
     `Hey ${name}, it's Brady. I saw ${company}'s policy coming up for renewal...`,
     `${name}, Brady here. Real quick—who handles the insurance shopping over there at ${company}?`,
-    `Hi ${name}, Brady with Nexus G Partners. I'm calling because ${company}'s commercial policy is expiring soon, and I found something that might save you money...`,
+    `Hi ${name}, Brady with David Hughes Insurance. I'm calling because ${company}'s commercial policy is expiring soon, and I found something that might save you money...`,
     `${name}, it's Brady. I'm working with a few ${lead.industry || 'business'} owners in ${lead.state || 'the area'} on their renewals. Are you handling that for ${company}?`,
     `Hey ${name}, Brady. Quick question—you got 30 seconds? I'm looking at ${company}'s policy expiring ${calculateUrgency(lead.xDate)}...`
   ];
