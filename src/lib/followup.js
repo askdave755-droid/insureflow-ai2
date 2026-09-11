@@ -81,7 +81,7 @@ async function handleCallOutcome(lead, analysis, actor = 'system') {
         const config = require('../config');
         const first = (lead.name || 'there').split(' ')[0];
         await brevoSMS(lead.phone,
-          first + ', Brady here (Nexus G Partners) - good talking. Grab your 4-minute comparison slot here: ' +
+          first + ', Brady here (David Hughes Insurance) - good talking. Grab your 4-minute comparison slot here: ' +
           config.CALENDLY_LINK + ' Reply STOP to opt out');
       } catch (err) {
         console.warn(`⚠️ Callback SMS failed for ${label}: ${err.message}`);

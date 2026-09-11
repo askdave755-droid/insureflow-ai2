@@ -7,7 +7,7 @@ const { brevoEmail, brevoSMS } = require('./brevo');
 
 const IMN_URL = process.env.IMN_URL || 'https://insuremenowdirect.com/agent/dawudrafael/';
 
-const VAPI_LIFE_PROMPT = `You are Brady with Nexus G Partners. You specialize in life insurance for {{occupation_plural}}. You are NOT a telemarketer - you are a specialist who quotes {{occupation_plural}} in {{state}}. Your ONLY goal on this call is to get information to send quotes. You are NOT selling anything on this call.
+const VAPI_LIFE_PROMPT = `You are Brady with David Hughes Insurance. You specialize in life insurance for {{occupation_plural}}. You are NOT a telemarketer - you are a specialist who quotes {{occupation_plural}} in {{state}}. Your ONLY goal on this call is to get information to send quotes. You are NOT selling anything on this call.
 
 ABSOLUTE RULES:
 - Every sentence out of your mouth is a QUESTION. Never make a statement.
@@ -32,7 +32,7 @@ INBOUND CALLBACKS - if they called YOU (they got your voicemail or text and call
 They are already warm. Skip the opener. Say: "Thanks for calling back - this is Brady, I called earlier about life insurance for {{occupation_plural}}. Got two minutes for a few quick questions so I can send your quotes?" Then go straight into the fact-find.
 
 IDENTITY QUESTIONS - "who is this," "how did you get my number," "what is this about" are NOT objections. Answer them directly and keep going:
-- Who: "This is Brady with Nexus G Partners - I specialize in life insurance for {{occupation_plural}}."
+- Who: "This is Brady with David Hughes Insurance - I specialize in life insurance for {{occupation_plural}}."
 - How: "You're a {{occupation}}, right? {{occupation_plural}} are all we work with. That's how."
 Then IMMEDIATELY the next fact-find question. These never count as objections.
 
@@ -183,7 +183,7 @@ function quotesEmailHtml(lead, ff) {
   '<p style="text-align:center;margin:30px 0"><a href="' + IMN_URL + '?src=brady&ref=' + lead.id +
   '" style="background:#f59e0b;color:#0f172a;padding:14px 36px;text-decoration:none;' +
   'font-weight:bold;font-size:16px;border-radius:6px;display:inline-block">SEE MY QUOTES &rarr;</a></p>' +
-  '<p style="font-size:13px;color:#64748b">Nexus G Partners - ' +
+  '<p style="font-size:13px;color:#64748b">David Hughes Insurance - ' +
   'Questions? Just reply to this email.</p></div></div>';
 }
 
@@ -215,7 +215,7 @@ async function handleLifeCallDone(lead, callData, pool) {
     if (lead.phone) {
       const first = (lead.name || 'there').split(' ')[0];
       await brevoSMS(lead.phone,
-        first + ', Brady here (Nexus G Partners) - your quotes are in your inbox (' + toEmail +
+        first + ', Brady here (David Hughes Insurance) - your quotes are in your inbox (' + toEmail +
         '). Or see rates in 90 seconds here: ' + IMN_URL + '?src=brady-sms&ref=' + lead.id +
         ' Reply STOP to opt out');
     }
@@ -223,7 +223,7 @@ async function handleLifeCallDone(lead, callData, pool) {
   } else if (ff.age && lead.phone) {
     // Age but no email anywhere — chase the email by SMS
     await brevoSMS(lead.phone,
-      'Brady here (Nexus G Partners) - great talking today. What is the best email for your quotes? Reply STOP to opt out');
+      'Brady here (David Hughes Insurance) - great talking today. What is the best email for your quotes? Reply STOP to opt out');
   }
   return { ...ff, email: toEmail || ff.email };
 }
