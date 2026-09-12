@@ -121,6 +121,9 @@ function attachLifeRoutes(app, pool) {
   });
 
   // Browser-friendly life test call: GET /api/life/test-call/:phone?force=true
+  // Test lead uses occupation 'barber' (person noun) — matches what
+  // lib/occupations.js produces for real HasData imports, so the
+  // opener "You still a {{occupation}}?" reads correctly on test calls.
   app.get('/api/life/test-call/:phone', requireAdminKey, async (req, res) => {
     try {
       const phone = formatPhoneE164(req.params.phone);
@@ -134,7 +137,7 @@ function attachLifeRoutes(app, pool) {
           email: 'askdave755@gmail.com',
           company: 'Test Barbershop',
           industry: 'barbershop',
-          occupation: 'barbershop',
+          occupation: 'barber',
           state: 'MI',
           insuranceType: 'life',
           vertical: 'life_fe',
