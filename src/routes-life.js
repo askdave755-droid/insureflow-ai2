@@ -12,6 +12,7 @@ const { formatPhoneE164 } = require('./lib/validate');
 const { quotesEmailHtml } = require('./lib/lifePipeline');
 const { brevoEmail, brevoSMS } = require('./lib/brevo');
 const { requireAdminKey } = require('./lib/auth');
+const { detectOccupation } = require('./lib/occupations');
 const config = require('./config');
 
 // Russell completeness score (reference weights): age 25, tobacco 20,
@@ -25,6 +26,26 @@ function factFindScore(l) {
   if (l.monthlyPremium) s += 10;
   if (l.email) s += 20;
   return Math.min(s, 100);
+}
+
+// ─── gosom google-maps-scraper CSV helpers ───
+// gosom rows carry a full address string, no separate city/state columns.
+// Handles "123 Main St, Detroit, MI 48201", "Detroit, MI 48201", "Detroit, MI".
+function parseGmapsAddress(address) {
+  const a = String(address || '');
+  let m = a.match(/,\s*([^,]+),\s*([A-Z]{2})\s+\d{5}/i);          // street, city, ST zip
+  if (m) return { city: m[1].trim(), state: m[2].toUpperCase() };
+  m = a.match(/^\s*([^,]+),\s*([A-Z]{2})(?:\s+\d{5})?\s*$/i);     // city, ST [zip]
+  if (m) return { city: m[1].trim(), state: m[2].toUpperCase() };
+  m = a.match(/,\s*([A-Z]{2})\s+\d{5}/i);                          // street, ST zip (no city)
+  if (m) return { city: null, state: m[1].toUpperCase() };
+  return { city: null, state: null };
+}
+
+// gosom -email output may hold several addresses in one cell.
+function firstEmail(raw) {
+  const m = String(raw || '').match(/[\w.+-]+@[\w-]+\.[\w.]{2,}/);
+  return m ? m[0] : '';
 }
 
 function attachLifeRoutes(app, pool) {
@@ -253,8 +274,21 @@ function attachLifeRoutes(app, pool) {
     res.json(out);
   });
 
-  // ── Bulk lead import (Apollo CSV for life, FMCSA CSV for commercial) ──
-  // POST /api/import/leads  { vertical: "life_fe"|"commercial_auto", autoCall?: false, leads?: [...], csv?: "name,phone,..." }
+  // ── Bulk lead import (gosom local scraper, Apollo CSV for life, FMCSA CSV for commercial) ──
+  // POST /api/import/leads
+  //   { vertical: "life_fe"|"commercial_auto", autoCall?: false,
+  //     source?: "gmaps_local",            // free-form ROI tag; default keeps legacy values
+  //     leads?: [...], csv?: "name,phone,..." }
+  //
+  // gosom google-maps-scraper CSV works as-is:
+  //   title           -> name + company
+  //   phone           -> phone
+  //   complete_address/address -> city + state parsed out
+  //   category        -> industry + occupation (via lib/occupations.js)
+  //   emails          -> first valid email
+  // Example: curl -X POST .../api/import/leads?key=ADMIN \
+  //   -H 'Content-Type: application/json' \
+  //   -d '{"vertical":"life_fe","source":"gmaps_local","csv":"'"$(cat results.csv)"'"}'
   app.post('/api/import/leads', requireAdminKey, async (req, res) => {
     const vertical = req.body.vertical;
     if (!['life_fe', 'commercial_auto'].includes(vertical)) {
@@ -275,7 +309,11 @@ function attachLifeRoutes(app, pool) {
     }
     if (!rows || !rows.length) return res.status(400).json({ error: 'leads array or csv string required' });
 
-    // Flexible column mapping (Apollo + FMCSA export names)
+    // ROI tracking: caller may tag the scraper/source explicitly
+    // (e.g. "gmaps_local"); otherwise keep the legacy per-vertical tags.
+    const sourceTag = req.body.source ? String(req.body.source).slice(0, 40) : null;
+
+    // Flexible column mapping (gosom + Apollo + FMCSA export names)
     const pick = (o, ...keys) => { for (const k of keys) { if (o[k]) return String(o[k]).trim(); } return ''; };
     const results = { imported: 0, skipped: 0, errors: 0, queued: 0, ids: [] };
 
@@ -283,9 +321,18 @@ function attachLifeRoutes(app, pool) {
       try {
         const first = pick(row, 'first_name', 'first', 'firstname');
         const last = pick(row, 'last_name', 'last', 'lastname');
-        const name = pick(row, 'name', 'full_name', 'contact_name', 'legal_name', 'dba_name') || (first + ' ' + last).trim();
+        const name = pick(row, 'name', 'full_name', 'contact_name', 'legal_name', 'dba_name', 'title') || (first + ' ' + last).trim();
         const phoneRaw = pick(row, 'phone', 'mobile_phone', 'work_direct_phone', 'phone_number', 'telephone', 'phone_1');
-        const state = pick(row, 'state', 'person_state', 'company_state', 'phy_state', 'st').toUpperCase().slice(0, 2);
+
+        // State/city: explicit columns win; otherwise parse the gosom address
+        let state = pick(row, 'state', 'person_state', 'company_state', 'phy_state', 'st').toUpperCase().slice(0, 2);
+        let city = pick(row, 'city', 'person_city', 'company_city', 'phy_city') || null;
+        if (!state) {
+          const parsed = parseGmapsAddress(pick(row, 'complete_address', 'address', 'full_address', 'location'));
+          if (parsed.state) state = parsed.state;
+          if (!city && parsed.city) city = parsed.city;
+        }
+
         const phone = formatPhoneE164(phoneRaw);
         if (!name || name.length < 2 || !phone || !state) { results.skipped++; continue; }
         if (!config.ALLOWED_STATES.includes(state)) { results.skipped++; continue; }
@@ -294,20 +341,23 @@ function attachLifeRoutes(app, pool) {
         if (existing) { results.skipped++; continue; }
 
         const isLife = vertical === 'life_fe';
+        const category = pick(row, 'category', 'categories');
+        const occ = category ? detectOccupation(category, pick(row, 'descriptions', 'description')) : null;
         const lead = await prisma.lead.create({
           data: {
             name,
             phone,
-            email: pick(row, 'email', 'email_1', 'work_email', 'personal_email') || null,
-            company: pick(row, 'company', 'company_name', 'organization_name', 'legal_name', 'dba_name') || null,
+            email: pick(row, 'email', 'email_1', 'work_email', 'personal_email') || firstEmail(row.emails) || null,
+            company: pick(row, 'company', 'company_name', 'organization_name', 'legal_name', 'dba_name', 'title') || null,
             title: pick(row, 'title', 'job_title') || null,
-            industry: pick(row, 'industry', 'occupation', 'operation_classification', 'cargo_carried') || null,
-            occupation: isLife ? (pick(row, 'occupation', 'industry', 'title') || null) : null,
+            industry: pick(row, 'industry', 'occupation', 'operation_classification', 'cargo_carried') || category || null,
+            occupation: isLife ? (pick(row, 'occupation') || (occ && occ.singular !== 'business owner' ? occ.singular : null) || null) : null,
+            occupationPlural: isLife && occ && occ.singular !== 'business owner' ? occ.plural : null,
             state,
-            city: pick(row, 'city', 'person_city', 'company_city', 'phy_city') || null,
+            city,
             insuranceType: isLife ? 'life' : 'commercial_auto',
             vertical,
-            source: isLife ? 'apollo_import' : 'fmcsa_import',
+            source: sourceTag || (isLife ? 'apollo_import' : 'fmcsa_import'),
             status: 'pending'
           }
         });
@@ -321,8 +371,8 @@ function attachLifeRoutes(app, pool) {
       } catch (e) { results.errors++; }
     }
 
-    console.log('Import ' + vertical + ': ' + results.imported + ' imported, ' + results.skipped + ' skipped, ' + results.queued + ' queued');
-    res.json({ success: true, vertical, ...results, ids: results.ids.slice(0, 20) });
+    console.log('Import ' + vertical + ' [' + (sourceTag || 'default') + ']: ' + results.imported + ' imported, ' + results.skipped + ' skipped, ' + results.queued + ' queued');
+    res.json({ success: true, vertical, source: sourceTag || undefined, ...results, ids: results.ids.slice(0, 20) });
   });
 }
 
