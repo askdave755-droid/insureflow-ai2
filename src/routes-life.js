@@ -78,13 +78,15 @@ function attachLifeRoutes(app, pool) {
   // Dashboard helper: per-niche conversion stats.
   // NOTE: try/catch + explicit [] params — the pg-style Prisma shim throws on
   // undefined params, and an uncaught async throw hangs the request (502).
+  // Counts cast ::int — pg returns COUNT/SUM as BigInt, which res.json can't serialize.
   app.get('/api/life/stats', requireAdminKey, async (req, res) => {
     try {
       const r = await pool.query(
-        `SELECT occupation, COUNT(*) AS total,
-                SUM(CASE WHEN status='called' THEN 1 ELSE 0 END) AS called,
-                SUM(CASE WHEN qualified THEN 1 ELSE 0 END) AS qualified,
-                SUM(CASE WHEN quote_email_sent THEN 1 ELSE 0 END) AS emailed
+        `SELECT occupation,
+                COUNT(*)::int AS total,
+                SUM(CASE WHEN status='called' THEN 1 ELSE 0 END)::int AS called,
+                SUM(CASE WHEN qualified THEN 1 ELSE 0 END)::int AS qualified,
+                SUM(CASE WHEN quote_email_sent THEN 1 ELSE 0 END)::int AS emailed
          FROM leads WHERE vertical='life_fe' GROUP BY occupation ORDER BY total DESC`,
         []);
       res.json(r.rows);
