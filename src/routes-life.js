@@ -48,6 +48,11 @@ function firstEmail(raw) {
   return m ? m[0] : '';
 }
 
+// Redis/Bull calls with a deadline — never hang the HTTP request.
+function withTimeout(promise, ms) {
+  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('redis timeout')), ms))]);
+}
+
 function attachLifeRoutes(app, pool) {
   // Manual scrape trigger (Phase 1): POST /api/scraper/hasdata/run
   // Body: { "query": "barbershops", "city": "Detroit, MI", "start": 0 }
@@ -93,6 +98,67 @@ function attachLifeRoutes(app, pool) {
     } catch (e) {
       console.error('life/stats failed:', e.message);
       res.status(500).json({ error: 'stats query failed', detail: e.message });
+    }
+  });
+
+  // ── CALL ENGINE START / STOP (backs public/calls.html) ──
+  // Stop = Bull global pause (stored in Redis — survives Railway redeploys).
+  // Start = sweep pending life leads into the queue (90s spacing) + resume.
+  // Job IDs are 'life-<leadId>' so repeat taps can't double-queue a lead.
+  // The worker enforces business hours per lead state — after-hours leads
+  // self-reschedule to the next calling window.
+
+  app.get('/api/life/calls/status', requireAdminKey, async (req, res) => {
+    let paused = null, counts = null;
+    try { paused = await withTimeout(callQueue.isPaused(), 5000); } catch (e) { /* redis slow */ }
+    try { counts = await withTimeout(callQueue.getJobCounts(), 5000); } catch (e) { counts = { unavailable: true }; }
+    try {
+      const pendingLife = await prisma.lead.count({ where: { vertical: 'life_fe', status: 'pending' } });
+      res.json({ paused, counts, pendingLife });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // GET /api/life/calls/start?limit=20          — queue + resume
+  // GET /api/life/calls/start?limit=20&dry=1    — preview only, queues nothing
+  app.get('/api/life/calls/start', requireAdminKey, async (req, res) => {
+    try {
+      const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+      const dry = req.query.dry === '1' || req.query.dry === 'true';
+      const leads = await prisma.lead.findMany({
+        where: { vertical: 'life_fe', status: 'pending' },
+        orderBy: { createdAt: 'asc' },
+        take: limit,
+        select: { id: true, name: true, phone: true, state: true, city: true, occupation: true, createdAt: true }
+      });
+      if (dry) return res.json({ dry: true, wouldQueue: leads.length, leads });
+
+      for (let i = 0; i < leads.length; i++) {
+        await callQueue.add('make-call', { leadId: leads[i].id },
+          { delay: 5000 + i * 90000, priority: 5, jobId: 'life-' + leads[i].id });
+      }
+      await callQueue.resume();
+      console.log('▶️ Life calls START: ' + leads.length + ' queued (90s spacing), queue resumed');
+      res.json({
+        queued: leads.length,
+        spacingSeconds: 90,
+        queue: 'resumed',
+        note: 'Worker enforces business hours per lead state — after-hours leads self-reschedule.'
+      });
+    } catch (e) {
+      console.error('life calls/start failed:', e.message);
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/life/calls/stop', requireAdminKey, async (req, res) => {
+    try {
+      await callQueue.pause();
+      console.log('⏹️ Life calls STOP: queue paused');
+      res.json({ status: 'paused', message: 'Queue paused — calls in progress finish, nothing new dials.' });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
     }
   });
 

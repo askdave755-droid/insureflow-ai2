@@ -68,7 +68,7 @@
 <div id="result"></div>
 
 <div class="links">
-  Have a CSV instead? <a href="/import.html">Upload it here</a> · <a href="/dashboard">Agency OS dashboard</a>
+  <a href="/calls.html">Start / Stop calls</a> · Have a CSV? <a href="/import.html">Upload it</a> · <a href="/dashboard">Agency OS dashboard</a>
 </div>
 
 <script>
@@ -100,7 +100,7 @@ go.addEventListener('click', async () => {
       : (d.error || ('HTTP ' + r.status)));
     out.classList.add('ok');
     out.textContent = '✅ ' + query + ' / ' + d.city + '\n📥 Imported: ' + d.imported + '\n⏭️ Skipped (dup/no phone): ' + d.skipped +
-      '\n\nCalls are OFF. Review the leads in the dashboard, then queue calls from there or ask me.';
+      '\n\nCalls stay OFF until you press START on the Call Engine page (link below).';
   } catch (e) {
     out.classList.add('bad');
     out.textContent = '❌ ' + e.message + (String(e.message).includes('Unauthorized') ? '\n\nAdmin key missing — open this page once with ?key=YOUR_ADMIN_KEY' : '');
