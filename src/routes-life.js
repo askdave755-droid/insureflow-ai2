@@ -75,15 +75,23 @@ function attachLifeRoutes(app, pool) {
     res.json(stats);
   });
 
-  // Dashboard helper: per-niche conversion stats
+  // Dashboard helper: per-niche conversion stats.
+  // NOTE: try/catch + explicit [] params — the pg-style Prisma shim throws on
+  // undefined params, and an uncaught async throw hangs the request (502).
   app.get('/api/life/stats', requireAdminKey, async (req, res) => {
-    const r = await pool.query(
-      `SELECT occupation, COUNT(*) AS total,
-              SUM(CASE WHEN status='called' THEN 1 ELSE 0 END) AS called,
-              SUM(CASE WHEN qualified THEN 1 ELSE 0 END) AS qualified,
-              SUM(CASE WHEN quote_email_sent THEN 1 ELSE 0 END) AS emailed
-       FROM leads WHERE vertical='life_fe' GROUP BY occupation ORDER BY total DESC`);
-    res.json(r.rows);
+    try {
+      const r = await pool.query(
+        `SELECT occupation, COUNT(*) AS total,
+                SUM(CASE WHEN status='called' THEN 1 ELSE 0 END) AS called,
+                SUM(CASE WHEN qualified THEN 1 ELSE 0 END) AS qualified,
+                SUM(CASE WHEN quote_email_sent THEN 1 ELSE 0 END) AS emailed
+         FROM leads WHERE vertical='life_fe' GROUP BY occupation ORDER BY total DESC`,
+        []);
+      res.json(r.rows);
+    } catch (e) {
+      console.error('life/stats failed:', e.message);
+      res.status(500).json({ error: 'stats query failed', detail: e.message });
+    }
   });
 
   // ── Additional life endpoints ──
