@@ -15,7 +15,9 @@ const axios = require('axios');
 const { detectOccupation } = require('./occupations');
 
 const HASDATA_API_KEY = process.env.HASDATA_API_KEY;
-const HASDATA_BASE = 'https://api.hasdata.com/apis/google-maps';
+// Correct API path per docs.hasdata.com: /scrape/google-maps/search
+// (old '/apis/google-maps' base returned HTTP 404 from HasData).
+const HASDATA_BASE = 'https://api.hasdata.com/scrape/google-maps';
 
 // Licensed launch states only (MI, AZ, TN, FL). Key = 'city, st' lowercase.
 const CITY_COORDS = {
