@@ -114,8 +114,9 @@ async function enroll(lead, sequenceName, mergeFields = {}, opts = {}) {
   await stopEnrollment(lead.id, 're-enrolled', sequenceName);
 
   const merge = { ...baseMerge(lead), ...mergeFields };
+  // NOTE: $3::jsonb cast required — Prisma $queryRawUnsafe infers text otherwise
   const ins = await pool.query(
-    `INSERT INTO sequence_enrollments (lead_id, sequence, merge) VALUES ($1, $2, $3) RETURNING id`,
+    `INSERT INTO sequence_enrollments (lead_id, sequence, merge) VALUES ($1, $2, $3::jsonb) RETURNING id`,
     [lead.id, sequenceName, JSON.stringify(merge)]);
   const enrollmentId = ins.rows[0].id;
 
