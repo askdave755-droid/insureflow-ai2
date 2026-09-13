@@ -20,7 +20,7 @@ async function brevoEmail(to, subject, html) {
   if (!API_KEY || !to) return null;
   try {
     const r = await axios.post('https://api.brevo.com/v3/smtp/email', {
-      sender: { name: 'Brady - Smart Choice Agents', email: SENDER },
+      sender: { name: 'David Hughes Insurance', email: SENDER },
       to: [{ email: to }],
       subject,
       htmlContent: html

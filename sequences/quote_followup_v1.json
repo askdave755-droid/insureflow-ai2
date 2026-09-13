@@ -1,0 +1,87 @@
+{
+  "sequence": "quote_followup_v1",
+  "trigger": "quote.issued  (lead status -> quoted, premium stored on quote object)",
+  "stop_conditions": [
+    "policy.bound  -> migrate lead to trucking_cross_sell_v1 / bound-customer track, stop this sequence",
+    "any human reply  -> stop automation, alert agent via SMS, hand off to human",
+    "opt-out / stop / no  -> DNC hard stop, suppression list"
+  ],
+  "identity": "From: David Hughes Insurance <david@yourdomain> · SMS from approved Brevo sender. Sign all: - David Hughes, David Hughes Insurance",
+  "steps": [
+    {
+      "day": 0,
+      "delay_hours": 2,
+      "channel": "sms",
+      "template": "quote_ready",
+      "subject": null,
+      "body": "Hi {first_name} - David Hughes Insurance here. Your quote is ready: {premium_range} for {coverage_summary}. Two quick questions and I can firm that up today. This thread is monitored - just reply. - David"
+    },
+    {
+      "day": 2,
+      "channel": "email",
+      "template": "coverage_vs_price",
+      "subject": "The difference between cheap and covered ({first_name})",
+      "body": "{first_name} - when you compare my number to others, compare the coverage lines too, not just the bottom dollar. The two places quotes usually get cheap: liability limits shaved down, and exclusions buried on page 4. Send me any competing quote and I'll line-item it against mine for free - if theirs is genuinely better, I'll tell you to take it. - David Hughes, David Hughes Insurance"
+    },
+    {
+      "day": 5,
+      "channel": "email+sms",
+      "template": "market_movement",
+      "subject": "What {business_class} risks are quoting at this week",
+      "body": "{first_name} - I ran {business_class} risks across 3 carriers this week. Rates for your class {moved_direction}. If your quote is more than a few weeks old it may already be stale - want me to re-run it fresh? Reply YES or grab 10 min: {booking_link} - David"
+    },
+    {
+      "day": 9,
+      "channel": "email",
+      "template": "quote_expiry",
+      "subject": "This quote holds until {expiry_date}",
+      "body": "{first_name} - a heads up: the rate on your quote is locked until {expiry_date}. After that it re-rates, and carrier appetite for {business_class} shifts month to month. If you're still deciding, one short call protects today's number: {booking_link} - David"
+    },
+    {
+      "day": 14,
+      "channel": "email+sms",
+      "template": "breakup",
+      "subject": "Closing your file (unless you tell me otherwise)",
+      "body": "{first_name} - I don't chase people. Your quote is still valid until {expiry_date}, but I'm closing your active file after today. If you want the coverage, reply ANY time - even months from now - and I'll re-open it. If you found coverage elsewhere, a one-word reply ('done') stops these messages instantly and I wish you the best. - David Hughes, David Hughes Insurance"
+    }
+  ],
+  "vertical_branches": {
+    "trucking_new_authority": {
+      "use": "business_class = 'new-authority trucking', coverage_summary = 'commercial auto, {power_units} unit(s)'",
+      "swap_day_5": "mention DOT filing and that lapsed insurance can pull authority",
+      "swap_day_9": "mention that new-authority rates improve after clean months of operation - binding now builds that history"
+    },
+    "life_fe": {
+      "use": "business_class = 'life/final expense coverage', coverage_summary = '{coverage_amount} {policy_type}'",
+      "swap_day_5": "mention health-class: 'if anything on your health questionnaire changes, rates can move - locking now protects the class you qualified for'",
+      "swap_day_9": "age-band nudge: 'rates step up at the next age band - this is the cheapest this coverage will ever be for you'"
+    },
+    "personal_home_auto": {
+      "use": "business_class = 'home & auto bundle', coverage_summary = '{home_value} home + {vehicle_count} vehicle(s)'",
+      "swap_day_5": "bundle-savings angle: 'most households we audit are leaving 15-20% on the table split across two carriers'",
+      "swap_day_9": "renewal-window angle if x_date known: 'if your current policy renews {x_date}, binding before it avoids a lapse flag'"
+    },
+    "commercial_general": {
+      "use": "default - business_class = lead.occupation, coverage_summary from quote lines"
+    }
+  },
+  "trigger_wiring": {
+    "quote_issued": "InsureFlow: on quote.status=issued -> enroll contact in Brevo list 'quote_followup', store {premium_range, coverage_summary, business_class, expiry_date=quote_date+30d}",
+    "bound_migration": "on policy.bound -> remove from 'quote_followup', add to bound track",
+    "reply_detection": "Brevo webhook -> inbound reply -> stop sequence + SMS agent + log_lead event",
+    "dnc": "any STOP keyword -> suppression list, blocks all sequences"
+  },
+  "test_protocol": {
+    "subject": "David's own phone + email as lead #1",
+    "how": [
+      "1. Create a test lead in InsureFlow (name 'Dave Test', your cell + gmail)",
+      "2. Log a test quote with premium_range set",
+      "3. Confirm day-0 SMS arrives within the delay window",
+      "4. Do NOT reply - let day 2 email land; verify it reads personal, not robotic",
+      "5. Reply 'YES' on day 5 touch - confirm automation stops and you get the agent-alert SMS",
+      "6. Reset, then test the STOP keyword on another pass - confirm hard stop",
+      "7. Bind the test lead - confirm migration to bound sequence (trucking_cross_sell_v1)"
+    ],
+    "what_to_listen_for": "tone (plain-spoken, one ask per message), timing (not midnight sends), merge fields all populated, stop-conditions firing"
+  }
+}

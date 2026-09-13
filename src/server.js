@@ -7,8 +7,10 @@ const prisma = require('./db');
 const pool = require('./lib/pool');
 const { attachCarrierRoutes } = require('./routes-carrier');
 const { attachLifeRoutes } = require('./routes-life');
+const { attachEventRoutes } = require('./routes-events');
 require('./orchestrator');
 require('./workers/callWorker');
+require('./lib/sequences');   // registers the sequence-step Bull worker
 
 const app = express();
 
@@ -41,9 +43,10 @@ app.use(express.static('public'));
 // Routes
 app.use(routes);
 
-// Carrier + Life routes expect a pg-style pool (shared shim in lib/pool.js)
+// Carrier + Life + Event routes expect a pg-style pool (shared shim in lib/pool.js)
 attachCarrierRoutes(app, pool);
 attachLifeRoutes(app, pool);
+attachEventRoutes(app, pool);
 
 // Error handler
 app.use((err, req, res, next) => {

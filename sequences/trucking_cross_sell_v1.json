@@ -1,0 +1,49 @@
+{
+  "sequence": "trucking_cross_sell_v1",
+  "trigger": "policy.bound OR quote.followup_optin",
+  "steps": [
+    {
+      "day": 0,
+      "channel": "sms",
+      "template": "bound_thanks",
+      "subject": null,
+      "body": "Thanks for binding with David Hughes Insurance, {owner_name}. Your policy docs are in your email and my direct line is saved in this thread. - David Hughes, David Hughes Insurance"
+    },
+    {
+      "day": 3,
+      "channel": "email+sms",
+      "template": "occ_accident_intro",
+      "subject": "The gap most owner-operators don't know they have",
+      "body": "{owner_name} - workers comp doesn't cover you as the owner. Occupational accident does: injury, disability, death benefit while you're under a load. Runs about {occ_acc_price}/mo for most single-truck operations. Reply YES and I'll add it to your file, or grab 10 minutes here: {booking_link}"
+    },
+    {
+      "day": 9,
+      "channel": "email",
+      "template": "new_authority_checklist",
+      "subject": "First 90 days with new authority - the insurance checklist",
+      "body": "Three things new carriers get wrong: 1) Letting the insurance lapse for even a day - FMCSA can pull your authority. 2) Adding a truck without telling the carrier - that claim can be denied. 3) Not updating your radius when you start running farther. Reply to this email any time you add equipment - it takes me two minutes and it keeps your policy valid."
+    },
+    {
+      "day": 16,
+      "channel": "email",
+      "template": "bridge_plan_60plus",
+      "subject": null,
+      "body_conditional": "ONLY if owner_age >= 60. Otherwise swap to: umbrella_liability pitch for the business.",
+      "body": "{owner_name} - you're {age}, so this is worth sixty seconds of your time: a health bridge plan covers the window until Medicare kicks in at 65. No underwriting, guaranteed issue options. Most owner-operators your age don't know this exists. Want the one-page summary?"
+    },
+    {
+      "day": 28,
+      "channel": "email+sms",
+      "template": "renewal_seed",
+      "subject": "Your renewal date is already on my calendar",
+      "body": "{owner_name} - your commercial auto renews {renewal_date}. I'll be shopping it against at least 3 carriers 45 days out so you never overpay at renewal. If you've added trucks, drivers, or started running a bigger radius, reply now - mid-term updates almost always save money at renewal."
+    },
+    {
+      "day": 45,
+      "channel": "vapi_call",
+      "template": "annual_audit_call",
+      "subject": null,
+      "body": "VAPI outbound: 'Hi {owner_name}, David's office - this is the annual audit call we promised. Any changes to trucks, drivers, or cargo? ... While I have you - did you ever look at that occupational accident coverage?' If no contact after 2 attempts, loop sequence back to day 28 and repeat quarterly."
+    }
+  ]
+}
