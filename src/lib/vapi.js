@@ -92,7 +92,9 @@ async function makeCall(lead) {
       phoneNumberId: cfg.phone,
       customer: {
         number: lead.phone,
-        name: lead.name
+        // VAPI rejects customer names over 40 chars — scraped business
+        // names ("Detroit Barber Co. Barbershop & Brand - ...") blow past it.
+        name: (lead.name || '').slice(0, 40)
       },
       assistantOverrides: {
         variableValues: variables
