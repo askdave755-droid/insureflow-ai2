@@ -22,6 +22,9 @@
  * - trucking_cross_sell_v1 day-16 is conditional on owner_age >= 60
  *   (umbrella swap below), and after the day-45 audit call the sequence
  *   loops back to the day-28 step on a 90-day cycle (quarterly).
+ *
+ * NOTE on casts: Prisma $queryRawUnsafe infers all params as text —
+ * id comparisons need $1::uuid and the merge insert needs $3::jsonb.
  */
 
 const fs = require('fs');
@@ -114,7 +117,6 @@ async function enroll(lead, sequenceName, mergeFields = {}, opts = {}) {
   await stopEnrollment(lead.id, 're-enrolled', sequenceName);
 
   const merge = { ...baseMerge(lead), ...mergeFields };
-  // NOTE: $3::jsonb cast required — Prisma $queryRawUnsafe infers text otherwise
   const ins = await pool.query(
     `INSERT INTO sequence_enrollments (lead_id, sequence, merge) VALUES ($1, $2, $3::jsonb) RETURNING id`,
     [lead.id, sequenceName, JSON.stringify(merge)]);
@@ -171,7 +173,7 @@ async function scheduleStep(enrollmentId, stepIndex, delayHours) {
  */
 async function fireStep(enrollmentId, stepIndex, opts = {}) {
   await ensureTable();
-  const seq = (await pool.query(`SELECT * FROM sequence_enrollments WHERE id=$1`, [enrollmentId])).rows[0];
+  const seq = (await pool.query(`SELECT * FROM sequence_enrollments WHERE id=$1::uuid`, [enrollmentId])).rows[0];
   if (!seq || seq.status !== 'active') return { skipped: 'inactive' };
 
   const def = loadSequence(seq.sequence);
@@ -227,7 +229,7 @@ async function fireStep(enrollmentId, stepIndex, opts = {}) {
   }
 
   await pool.query(
-    `UPDATE sequence_enrollments SET current_step=$2, updated_at=NOW() WHERE id=$1`,
+    `UPDATE sequence_enrollments SET current_step=$2, updated_at=NOW() WHERE id=$1::uuid`,
     [enrollmentId, stepIndex]);
   console.log(`📨 [${seq.sequence}] step ${stepIndex} (${step.template}, ${step.channel}) -> ${lead.name}`);
 
@@ -245,7 +247,7 @@ async function fireStep(enrollmentId, stepIndex, opts = {}) {
     sent.loop = { toStep: loopIdx, inHours: cycleHours };
   } else {
     await pool.query(
-      `UPDATE sequence_enrollments SET status='completed', updated_at=NOW() WHERE id=$1`,
+      `UPDATE sequence_enrollments SET status='completed', updated_at=NOW() WHERE id=$1::uuid`,
       [enrollmentId]);
     sent.done = true;
   }
