@@ -4,6 +4,7 @@
  *   quoteCreated       VAPI log_quote        -> quote record + discovery, opt-in confirm SMS
  *   quoteIssued        quote firmed          -> enroll quote_followup_v1 (day 0/2/5/9/14)
  *   appointmentBooked  VAPI book_time        -> calendar hold task, SMS confirm, VAPI callback
+ *                       (skipCallback: true for Calendly — Dave runs those meetings himself)
  *   policyBound        manual / carrier hook -> stop follow-up, bound track, cross-sell enroll,
  *                                               policy + renewal (+320d task), agent SMS
  *   crosssellConsented VAPI log_cross_sell   -> sub-deal task/opportunity, agent SMS
@@ -88,7 +89,7 @@ async function quoteIssued(lead, data = {}) {
   return { enrollmentId: enr.enrollmentId, merge };
 }
 
-// ── appointment.booked (VAPI book_time) ──
+// ── appointment.booked (VAPI book_time, or Calendly with skipCallback) ──
 async function appointmentBooked(lead, data = {}) {
   const when = data.time ? new Date(data.time) : plusDays(1);
   if (isNaN(when.getTime())) throw new Error('Invalid appointment time');
@@ -107,10 +108,16 @@ async function appointmentBooked(lead, data = {}) {
     when.toLocaleString('en-US', { timeZone: 'America/Phoenix', weekday: 'long', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' }) +
     ' (AZ time). I will call you then - this thread works if anything changes. - David');
 
-  const delay = Math.max(when.getTime() - Date.now(), 0);
-  await callQueue.add('make-call', { leadId: lead.id }, { delay, priority: 1 });
-  console.log(`📅 appointment.booked: ${lead.name} @ ${when.toISOString()} (callback queued)`);
-  return { taskId: task && task.id, callbackAt: when.toISOString() };
+  // VAPI callback at the appointment time — skipped for Calendly bookings
+  // (Dave runs those meetings himself; a robocall then would be wrong)
+  let callbackAt = null;
+  if (!data.skipCallback) {
+    const delay = Math.max(when.getTime() - Date.now(), 0);
+    await callQueue.add('make-call', { leadId: lead.id }, { delay, priority: 1 });
+    callbackAt = when.toISOString();
+  }
+  console.log(`📅 appointment.booked: ${lead.name} @ ${when.toISOString()} (callback: ${callbackAt || 'skipped'})`);
+  return { taskId: task && task.id, callbackAt };
 }
 
 // ── policy.bound (manual mark or carrier webhook) ──

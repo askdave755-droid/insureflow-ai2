@@ -6,13 +6,15 @@
  *   attachEventRoutes(app, pool);
  *   require('./lib/sequences');   // registers the sequence-step worker
  *
- * All /api/events/* routes need the admin key. The Brevo inbound webhook
- * takes the key as ?key= in the webhook URL (Brevo can't set headers).
+ * All /api/events/* routes need the admin key. Webhook routes (Brevo inbound,
+ * Calendly) take the key as ?key= in the webhook URL — neither provider can
+ * set custom auth headers on subscription URLs.
  */
 
 const prisma = require('./db');
 const { requireAdminKey } = require('./lib/auth');
 const { formatPhoneE164 } = require('./lib/validate');
+const { brevoSMS } = require('./lib/brevo');
 const events = require('./lib/events');
 const seq = require('./lib/sequences');
 
@@ -51,7 +53,7 @@ function attachEventRoutes(app, pool) {
   });
 
   // ── appointment.booked ──
-  // POST /api/events/appointment { leadId|phone, time (ISO), notes? }
+  // POST /api/events/appointment { leadId|phone, time (ISO), notes?, skipCallback? }
   app.post('/api/events/appointment', requireAdminKey, async (req, res) => {
     try {
       const lead = await findLead(req.body);
@@ -120,6 +122,106 @@ function attachEventRoutes(app, pool) {
       res.json({ success: true, stopped });
     } catch (e) {
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ── Calendly webhook ──
+  // Subscription is created via the Calendly API (paid plan + personal
+  // access token) — there is no dashboard UI for it. Callback URL:
+  //   POST /webhook/calendly?key=ADMIN_KEY
+  // invitee.created -> appointment task + confirm SMS + agent alert
+  //                    (NO VAPI callback — Dave runs Calendly meetings himself)
+  // invitee.canceled -> close the appointment task + agent alert
+  app.post('/webhook/calendly', requireAdminKey, async (req, res) => {
+    try {
+      const event = req.body?.event;
+      const p = req.body?.payload || {};
+      const email = (p.email || '').toLowerCase();
+      const name = p.name || 'Calendly Booking';
+      const start = p.scheduled_event?.start_time || null;
+
+      // Phone usually comes through a custom booking question
+      let phone = null;
+      const qa = p.questions_and_answers || [];
+      for (const q of qa) {
+        if (/phone/i.test(q.question || '')) {
+          phone = formatPhoneE164(q.answer);
+          if (phone) break;
+        }
+      }
+
+      let lead = null;
+      if (phone) {
+        lead = await prisma.lead.findFirst({
+          where: { phone, status: { notIn: ['closed'] } },
+          orderBy: { createdAt: 'desc' }
+        });
+      }
+      if (!lead && email) {
+        lead = await prisma.lead.findFirst({
+          where: { email, status: { notIn: ['closed'] } },
+          orderBy: { createdAt: 'desc' }
+        });
+      }
+
+      const whenStr = start
+        ? new Date(start).toLocaleString('en-US', { timeZone: 'America/Phoenix', weekday: 'short', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+        : 'time unknown';
+
+      // ── CANCEL ──
+      if (event === 'invitee.canceled') {
+        if (lead) {
+          await prisma.task.updateMany({
+            where: { leadId: lead.id, type: 'APPOINTMENT', status: 'open' },
+            data: { status: 'done', completedAt: new Date() }
+          });
+        }
+        await brevoSMS(events.AGENT_PHONE,
+          `❌ CALENDLY CANCEL: ${name} (${email || phone || 'no contact'})${lead ? ' — appointment task closed.' : ' — not in InsureFlow.'}`);
+        console.log(`📅 Calendly cancel: ${name}`);
+        return res.json({ received: true, event, matched: !!lead });
+      }
+
+      if (event !== 'invitee.created') return res.json({ received: true, ignored: event });
+
+      // ── BOOKING ──
+      if (!lead && phone) {
+        // Hot inbound from an unknown contact — create the lead.
+        // State defaults to MI (primary market); drafaelife = life booking link.
+        lead = await prisma.lead.create({
+          data: {
+            name,
+            phone,
+            email: email || null,
+            state: 'MI',
+            insuranceType: 'life',
+            vertical: 'life_fe',
+            source: 'calendly',
+            status: 'pending'
+          }
+        });
+        console.log(`📅 Calendly booking created NEW lead: ${name} (${phone})`);
+      }
+
+      if (!lead) {
+        // No phone anywhere and no existing lead — alert agent with what we have
+        await brevoSMS(events.AGENT_PHONE,
+          `📅 CALENDLY BOOKING (unmatched): ${name} — ${whenStr} AZ. Email: ${email || 'none'}. Not in InsureFlow and no phone on the booking — reach them by email.`);
+        return res.json({ received: true, event, matched: false });
+      }
+
+      const appt = await events.appointmentBooked(lead, {
+        time: start,
+        notes: 'Booked via Calendly (' + (p.scheduled_event?.uri || 'no uri') + ')',
+        skipCallback: true
+      });
+      await brevoSMS(events.AGENT_PHONE,
+        `📅 CALENDLY BOOKING: ${lead.name} — ${whenStr} AZ. Task created, confirmation SMS sent to ${lead.phone}.`);
+      console.log(`📅 Calendly booking: ${lead.name} @ ${start}`);
+      res.json({ received: true, event, matched: true, leadId: lead.id, ...appt });
+    } catch (e) {
+      console.error('calendly webhook failed:', e.message);
+      res.status(200).json({ received: true, error: e.message });
     }
   });
 
