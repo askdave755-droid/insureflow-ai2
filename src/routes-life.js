@@ -37,7 +37,7 @@ function parseGmapsAddress(address) {
   if (m) return { city: m[1].trim(), state: m[2].toUpperCase() };
   m = a.match(/^\s*([^,]+),\s*([A-Z]{2})(?:\s+\d{5})?\s*$/i);     // city, ST [zip]
   if (m) return { city: m[1].trim(), state: m[2].toUpperCase() };
-  m = a.match(/,\s*([A-Z]{2})\s+\d{5}/i);                          // street, ST zip (no city)
+  m = a.match(/,\s*([A-Z]{2})\s+\d{5}/);                          // street, ST zip (no city)
   if (m) return { city: null, state: m[1].toUpperCase() };
   return { city: null, state: null };
 }
@@ -348,6 +348,24 @@ function attachLifeRoutes(app, pool) {
       } catch (e) { out.sendError = (e.response && e.response.data) || e.message; }
     }
     res.json(out);
+  });
+
+  // Brevo email diagnostics: GET /api/life/test-email?to=you@example.com
+  // Reports the configured sender, then fires a real test through brevoEmail
+  // so we can verify SPF/DKIM/DMARC all PASS in Gmail 'Show original'.
+  app.get('/api/life/test-email', requireAdminKey, async (req, res) => {
+    const to = req.query.to;
+    const out = { sender: process.env.BREVO_SENDER || 'noreply@example.com', senderName: 'David Hughes Insurance' };
+    if (!to) return res.json({ ...out, note: 'pass ?to=address to send a test' });
+    const html = '<div style="font-family:Arial,sans-serif;max-width:560px">' +
+      '<h2 style="margin:0 0 8px">Test email - David Hughes Insurance</h2>' +
+      '<p>This is a delivery + authentication test from the InsureFlow system. ' +
+      'If you are reading this, david@nexusgpartners.net is sending correctly.</p>' +
+      '<p style="color:#666;font-size:13px">Check the headers in Gmail (Show original): ' +
+      'SPF, DKIM and DMARC should all say PASS.</p>' +
+      '<p>- David Hughes Insurance<br>nexusgpartners.net</p></div>';
+    const r = await brevoEmail(to, 'Test email - David Hughes Insurance', html);
+    res.json({ ...out, sentTo: to, brevoResponse: r || 'failed - check Railway logs' });
   });
 
   // ── Bulk lead import (gosom local scraper, Apollo CSV for life, FMCSA CSV for commercial) ──
