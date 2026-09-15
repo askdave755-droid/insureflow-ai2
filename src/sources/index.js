@@ -12,6 +12,8 @@ const prisma = require('../db');
 //   Search:   POST https://api.apollo.io/api/v1/mixed_people/api_search
 //             Auth via 'X-Api-Key' header. Filters: person_titles[], person_locations[],
 //             q_keywords, per_page, page. NOTE: search does NOT return emails/phones.
+//             q_keywords ANDs every word — keep it to ONE focused term.
+//             Response uses last_name_obfuscated, not last_name.
 //   Enrich:   POST https://api.apollo.io/api/v1/people/bulk_match (up to 10 per call)
 //             Returns emails/phones; reveal_phone_number requires a webhook_url and a
 //             paid plan, so we only use synchronously returned data and handle
@@ -25,6 +27,14 @@ const prisma = require('../db');
 //      rotates cities so we get depth (pages 1..N) per city instead of re-reading
 //      the same first page of a blended location string.
 //   4. Optional targeting overrides (titles/keywords) for non-trucking commercial lines.
+//
+// 2026-09-15 PATCH 2 (post-upgrade smoke test):
+//   5. q_keywords fix — Apollo ANDs every word in q_keywords; a 4-word string like
+//      "trucking logistics freight transportation" matched NOTHING. Now sends only
+//      the first word.
+//   6. last_name fix — api_search returns last_name_obfuscated ("Mo***s"), never
+//      last_name. All name construction and bulk_match now use it (asterisks stripped
+//      for display, raw form passed to bulk_match for matching).
 const APOLLO_HEADERS = () => ({
   'Content-Type': 'application/json',
   'Cache-Control': 'no-cache',
@@ -32,7 +42,7 @@ const APOLLO_HEADERS = () => ({
 });
 
 const DEFAULT_TITLES = ['Owner', 'President', 'CEO', 'Fleet Manager', 'Operations Manager'];
-const DEFAULT_KEYWORDS = 'trucking logistics freight transportation';
+const DEFAULT_KEYWORDS = 'trucking';  // single-word: Apollo ANDs multi-word q_keywords, killing results
 const MAX_PAGES_PER_CALL = 3;
 
 function logApolloError(context, err) {
@@ -51,8 +61,13 @@ function logApolloError(context, err) {
 async function filterExistingPeople(people) {
   if (!people.length) return [];
 
+  // Apollo api_search returns last_name_obfuscated (e.g. "Mo***s"), not last_name.
+  // Use it for dedupe display and pass it to bulk_match so enrichment can match.
   const names = people
-    .map(p => `${p.first_name || ''} ${p.last_name || ''}`.trim())
+    .map(p => {
+      const ln = (p.last_name || p.last_name_obfuscated || '').replace(/\*+/g, '');
+      return `${p.first_name || ''} ${ln}`.trim();
+    })
     .filter(Boolean);
   const emails = people.map(p => p.email).filter(Boolean);
 
@@ -61,10 +76,13 @@ async function filterExistingPeople(people) {
 
   // Pair each name with its own company (not full cross-product)
   const pairs = people
-    .map(p => ({
-      name: `${p.first_name || ''} ${p.last_name || ''}`.trim(),
-      company: p.organization?.name
-    }))
+    .map(p => {
+      const ln = (p.last_name || p.last_name_obfuscated || '').replace(/\*+/g, '');
+      return {
+        name: `${p.first_name || ''} ${ln}`.trim(),
+        company: p.organization?.name
+      };
+    })
     .filter(x => x.name && x.company);
   for (const pair of pairs.slice(0, 100)) {
     or.push({ AND: [{ name: pair.name }, { company: pair.company }] });
@@ -95,7 +113,8 @@ async function filterExistingPeople(people) {
   const existingNames = new Set(existing.map(e => (e.name || '').toLowerCase()));
 
   const fresh = people.filter(p => {
-    const nm = `${p.first_name || ''} ${p.last_name || ''}`.trim().toLowerCase();
+    const ln = (p.last_name || p.last_name_obfuscated || '').replace(/\*+/g, '');
+    const nm = `${p.first_name || ''} ${ln}`.trim().toLowerCase();
     const co = (p.organization?.name || '').toLowerCase();
     if (p.email && existingEmails.has(p.email)) return false;
     if (co && existingNameCo.has(`${nm}|${co}`)) return false;
@@ -119,7 +138,7 @@ async function enrichApolloPeople(people) {
           details: batch.map(p => ({
             id: p.id,
             first_name: p.first_name,
-            last_name: p.last_name,
+            last_name: p.last_name || p.last_name_obfuscated || undefined,
             organization_name: p.organization?.name
           }))
         },
@@ -154,12 +173,15 @@ async function fetchApolloContacts(state, city, limit = 100, opts = {}) {
   while (page <= maxPage && collected.length < limit) {
     let people;
     try {
+      // q_keywords: Apollo ANDs every word — a 4-word string kills all results.
+      // Use only the first (most specific) word; the title filter does the rest.
+      const singleKeyword = (keywords || '').split(/\s+/)[0] || undefined;
       const response = await axios.post(
         'https://api.apollo.io/api/v1/mixed_people/api_search',
         {
           person_titles: titles,
           person_locations: [`${city}, ${state}, US`],
-          q_keywords: keywords,
+          ...(singleKeyword ? { q_keywords: singleKeyword } : {}),
           per_page: perPage,
           page
         },
@@ -203,7 +225,7 @@ async function fetchApolloContacts(state, city, limit = 100, opts = {}) {
       p.organization?.phone
     );
     return {
-      name: `${p.first_name || ''} ${p.last_name || e.last_name || ''}`.trim(),
+      name: `${p.first_name || ''} ${(p.last_name || p.last_name_obfuscated || '').replace(/\*+/g, '') || e.last_name || ''}`.trim(),
       phone,
       email: e.email || p.email,
       company: p.organization?.name || e.organization?.name,
