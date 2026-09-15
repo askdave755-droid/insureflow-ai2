@@ -19,7 +19,7 @@ datasource db {
 model Lead {
   id               String           @id @default(uuid())
   name             String
-  phone            String?           // nullable — email-only Apollo leads have no phone
+  phone            String           // required — use '' for email-only leads
   email            String?
   company          String?
   title            String?
