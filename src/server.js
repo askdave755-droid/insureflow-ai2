@@ -10,11 +10,10 @@ const { attachLifeRoutes } = require('./routes-life');
 const { attachEventRoutes } = require('./routes-events');
 const { attachAnnuityRoutes } = require('./routes-annuity');
 
-// Re-enable one at a time to isolate crash
 require('./orchestrator');
 require('./life-feeder');   // automated HasData life/FE lead generation
 require('./workers/callWorker');
-// require('./lib/sequences');
+require('./lib/sequences');   // registers the sequence-step Bull worker
 
 const app = express();
 
