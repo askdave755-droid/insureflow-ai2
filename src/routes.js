@@ -624,8 +624,6 @@ router.post('/webhook/phantom', verifyPhantomWebhook, async (req, res) => {
     const body = req.body || {};
 
     // Case A: results included directly in the webhook body.
-    // Phantom sends resultObject as a JSON-encoded STRING in completion
-    // notifications — parse string form as well as array form.
     let results = parseMaybeStringArray(body.resultObject)
                || parseMaybeStringArray(body.results);
 
@@ -654,7 +652,6 @@ router.post('/webhook/phantom', verifyPhantomWebhook, async (req, res) => {
           }
         } catch (err) {
           console.error('❌ Phantom fetch-output failed:', err.response?.status, err.response?.data || err.message);
-          // Still 200 — don't let Phantom retry-storm us
           return res.json({ received: true, processed: 0, queued: 0, reason: 'fetch-output error', error: err.message });
         }
       } else {
@@ -672,20 +669,16 @@ router.post('/webhook/phantom', verifyPhantomWebhook, async (req, res) => {
 
       const company = item.title || item.name || item.companyName || null;
 
-      // Skip national megacarriers / chains — they don't buy from independents
       if (isSkippableBusiness(company)) {
         skippedNational++;
         continue;
       }
 
-      // Dedupe: skip if an open lead with this phone already exists
       const existing = await prisma.lead.findFirst({
         where: { phone, status: { not: 'closed' } }
       });
       if (existing) { skipped++; continue; }
 
-      // Default to MI (primary market) when the address can't be parsed —
-      // never silently tag a lead with the wrong state's calling-hours rules.
       const state = (parseStateFromItem(item) || body.state || 'MI').toUpperCase();
 
       const lead = await prisma.lead.create({
@@ -701,7 +694,6 @@ router.post('/webhook/phantom', verifyPhantomWebhook, async (req, res) => {
         }
       });
 
-      // FMCSA enrichment — best-effort, never blocks queueing
       try {
         const fmcsa = await enrichWithFMCSA({
           name: lead.name,
@@ -718,7 +710,6 @@ router.post('/webhook/phantom', verifyPhantomWebhook, async (req, res) => {
         console.warn(`⚠️ FMCSA enrichment failed for lead ${lead.id}: ${err.message}`);
       }
 
-      // Phase 2 — score, tier, prioritize before compliance gate
       const intel = runIntelligence(lead);
       await prisma.lead.update({ where: { id: lead.id }, data: intel.updates });
 
@@ -747,7 +738,6 @@ router.get('/admin/resume', requireAdminKey, (req, res) => {
 });
 
 router.get('/admin/status', requireAdminKey, async (req, res) => {
-  // Never hang: if Redis/Bull is unresponsive, fall back after 5s.
   let counts;
   try {
     counts = await Promise.race([
@@ -775,10 +765,6 @@ router.get('/admin/status', requireAdminKey, async (req, res) => {
 });
 
 // ─── APOLLO SMOKE TEST (phone-friendly) ───
-// GET /admin/apollo/test?key=...&city=Detroit&state=MI
-// Runs a raw Apollo search + one full production pull (limit 5, single page)
-// and reports exactly what comes back: total_entries, has_phone/has_email flags,
-// cursor, and a sample. Use this to verify the plan upgrade and diagnose query issues.
 router.get('/admin/apollo/test', requireAdminKey, async (req, res) => {
   const state = (req.query.state || 'MI').toUpperCase();
   const city = req.query.city || 'Detroit';
@@ -789,7 +775,6 @@ router.get('/admin/apollo/test', requireAdminKey, async (req, res) => {
 
   const started = Date.now();
   try {
-    // First: raw search call to see total_entries — tells us if Apollo matches ANYTHING
     const searchResp = await axios.post(
       'https://api.apollo.io/api/v1/mixed_people/api_search',
       {
@@ -803,7 +788,6 @@ router.get('/admin/apollo/test', requireAdminKey, async (req, res) => {
     const rawPeople = searchResp.data.people || [];
     const totalEntries = searchResp.data.total_entries;
 
-    // Then: walk the pipeline manually with debug capture
     const { filterExistingPeople, enrichApolloPeople } = require('./sources');
     const searchResp2 = await axios.post(
       'https://api.apollo.io/api/v1/mixed_people/api_search',
@@ -867,10 +851,10 @@ router.get('/admin/apollo/test', requireAdminKey, async (req, res) => {
         title: l.title
       })),
       note: (totalEntries ?? 0) === 0
-        ? 'Apollo search matched NOTHING (total_entries=0). Location or keyword combo is too narrow for their DB. Try broadening.'
+        ? 'Apollo search matched NOTHING (total_entries=0).'
         : result.leads.length === 0
-          ? 'Apollo HAS matches (total_entries>0) but pipeline produced 0 phone-qualified leads. Check pipelineDebug for the exact break point.'
-          : 'Apollo api_search + enrichment pipeline working end-to-end.'
+          ? 'Apollo HAS matches but pipeline produced 0 leads. Check pipelineDebug.'
+          : 'Apollo pipeline working end-to-end.'
     });
   } catch (err) {
     res.json({
@@ -880,143 +864,6 @@ router.get('/admin/apollo/test', requireAdminKey, async (req, res) => {
       apolloError: err.response?.data || null,
       message: err.message
     });
-  }
-});
-
-// ─── BREVO ENGAGEMENT WEBHOOK ───
-// POST /webhook/brevo — Brevo sends email events here (configured in Brevo
-// dashboard > Transactional > Webhooks). Events: opened, click, reply,
-// unsubscribed, spam, hard_bounce, soft_bounce, delivered.
-//
-// Behavior by event:
-//   opened / click        -> bump opportunityScore, log engagement, alert Dave on click
-//   reply                 -> STOP drip, flag lead HOT, SMS+email Dave immediately
-//   unsubscribed / spam   -> stop drip, add to DNC (hard stop)
-//   hard_bounce           -> mark email invalid, stop drip
-//
-// Auth: optional BREVO_WEBHOOK_SECRET checked as ?secret= query param.
-// Brevo doesn't sign webhooks natively, so the secret is appended to the
-// webhook URL in the Brevo dashboard (e.g. .../webhook/brevo?secret=xyz).
-router.post('/webhook/brevo', async (req, res) => {
-  try {
-    // Optional shared-secret check (set BREVO_WEBHOOK_SECRET in env)
-    if (process.env.BREVO_WEBHOOK_SECRET) {
-      const provided = req.query.secret || req.headers['x-brevo-secret'];
-      if (provided !== process.env.BREVO_WEBHOOK_SECRET) {
-        return res.status(401).json({ error: 'Invalid webhook secret' });
-      }
-    }
-
-    const events = Array.isArray(req.body) ? req.body : [req.body];
-    let processed = 0, alerts = 0, stopped = 0;
-
-    for (const evt of events) {
-      const eventType = (evt.event || '').toLowerCase();
-      const email = (evt.email || '').toLowerCase();
-      if (!email || !eventType) continue;
-
-      const lead = await prisma.lead.findFirst({
-        where: { email, status: { notIn: ['closed'] } },
-        orderBy: { createdAt: 'desc' }
-      });
-      if (!lead) continue;
-
-      const label = lead.company || lead.name;
-
-      if (eventType === 'opened' || eventType === 'open') {
-        // Bump engagement score slightly — cap to avoid inflation
-        await prisma.lead.update({
-          where: { id: lead.id },
-          data: { opportunityScore: Math.min((lead.opportunityScore || 0) + 2, 100) }
-        });
-        console.log(`📧 OPENED: ${label} <${email}>`);
-        processed++;
-      }
-
-      if (eventType === 'click') {
-        // Link click = high intent — alert Dave + bigger score bump
-        await prisma.lead.update({
-          where: { id: lead.id },
-          data: {
-            opportunityScore: Math.min((lead.opportunityScore || 0) + 10, 100),
-            scoreBand: 'HOT'
-          }
-        });
-        const link = evt.link || evt.url || 'a link';
-        const alertMsg = `🔥 CLICK: ${label} (${email}) just clicked ${link} in your drip email. Strike while it's hot.`;
-        try {
-          const { brevoSMS, brevoEmail } = require('./lib/brevo');
-          if (process.env.DAVE_ALERT_PHONE) await brevoSMS(process.env.DAVE_ALERT_PHONE, alertMsg);
-          await brevoEmail('askdave755@gmail.com', `🔥 Lead clicked: ${label}`, `<p>${alertMsg}</p><p>Lead ID: ${lead.id} · Phone: ${lead.phone || 'none'} · Company: ${label}</p>`);
-          alerts++;
-        } catch (alertErr) {
-          console.warn('⚠️ Click alert failed:', alertErr.message);
-        }
-        console.log(`📧 CLICKED: ${label} <${email}> -> ${link}`);
-        processed++;
-      }
-
-      if (eventType === 'reply') {
-        // Human replied — stop all automation, flag HOT, alert Dave NOW
-        try {
-          const { stopEnrollment } = require('./lib/sequences');
-          await stopEnrollment(lead.id, 'replied');
-        } catch (_) { /* sequence table may not exist yet */ }
-        await prisma.lead.update({
-          where: { id: lead.id },
-          data: { status: 'replied', scoreBand: 'HOT', opportunityScore: 100 }
-        });
-        const alertMsg = `💬 REPLY: ${label} (${email}) replied to your drip email. Check Brevo inbox and respond ASAP.`;
-        try {
-          const { brevoSMS, brevoEmail } = require('./lib/brevo');
-          if (process.env.DAVE_ALERT_PHONE) await brevoSMS(process.env.DAVE_ALERT_PHONE, alertMsg);
-          await brevoEmail('askdave755@gmail.com', `💬 Lead replied: ${label}`, `<p>${alertMsg}</p><p>Lead ID: ${lead.id} · Phone: ${lead.phone || 'none'} · Company: ${label}</p>`);
-          alerts++;
-        } catch (alertErr) {
-          console.warn('⚠️ Reply alert failed:', alertErr.message);
-        }
-        console.log(`📧 REPLIED: ${label} <${email}> — drip stopped, Dave alerted`);
-        stopped++;
-      }
-
-      if (eventType === 'unsubscribed' || eventType === 'spam') {
-        // Hard stop: DNC + stop drip
-        try {
-          const { stopEnrollment } = require('./lib/sequences');
-          await stopEnrollment(lead.id, eventType);
-        } catch (_) { /* ok */ }
-        try {
-          const { addToDnc } = require('./lib/compliance');
-          await addToDnc({ email, reason: `Brevo ${eventType}` }, 'webhook:brevo');
-        } catch (dncErr) {
-          console.warn('⚠️ DNC add failed:', dncErr.message);
-        }
-        await prisma.lead.update({
-          where: { id: lead.id },
-          data: { status: 'compliance_hold', complianceStatus: 'blocked', complianceNotes: `Brevo ${eventType}` }
-        });
-        console.log(`📧 ${eventType.toUpperCase()}: ${label} <${email}> — DNC + drip stopped`);
-        stopped++;
-      }
-
-      if (eventType === 'hard_bounce') {
-        try {
-          const { stopEnrollment } = require('./lib/sequences');
-          await stopEnrollment(lead.id, 'hard_bounce');
-        } catch (_) { /* ok */ }
-        await prisma.lead.update({
-          where: { id: lead.id },
-          data: { status: 'bounced' }
-        });
-        console.log(`📧 HARD BOUNCE: ${label} <${email}> — email invalid, drip stopped`);
-        stopped++;
-      }
-    }
-
-    res.json({ received: true, processed, alerts, stopped });
-  } catch (error) {
-    console.error('❌ Brevo webhook error:', error);
-    res.status(200).json({ received: true, error: error.message });
   }
 });
 
@@ -1044,17 +891,12 @@ router.post('/admin/nuclear-reset', requireAdminKey, async (req, res) => {
 });
 
 // ─── TARGETED CLEANUP ───
-// Deletes ONLY junk: test leads (manual_test + webhook self-tests) and
-// national-carrier/chain leads. Real scraped leads are kept. Requires
-// x-admin-key header like nuclear-reset.
 router.post('/admin/cleanup', requireAdminKey, async (req, res) => {
   try {
-    // 1) Test leads by source
     const byTestSource = await prisma.lead.deleteMany({
       where: { source: { in: ['manual_test'] } }
     });
 
-    // 2) Webhook/self-test dummies by name
     const byTestName = await prisma.lead.deleteMany({
       where: {
         OR: [
@@ -1067,7 +909,6 @@ router.post('/admin/cleanup', requireAdminKey, async (req, res) => {
       }
     });
 
-    // 3) National carriers / chains that slipped in before the skip filter
     let nationalDeleted = 0;
     const nationals = await prisma.lead.findMany({
       select: { id: true, name: true, company: true }
@@ -1099,7 +940,6 @@ router.post('/admin/cleanup', requireAdminKey, async (req, res) => {
 });
 
 // ─── COMPLIANCE MANAGEMENT (admin) ───
-// Add to internal DNC: { phone } or { email }, optional reason/source
 router.post('/admin/dnc', requireAdminKey, async (req, res) => {
   const { phone, email, reason, source } = req.body || {};
   if (!phone && !email) return res.status(400).json({ error: 'phone or email required' });
@@ -1120,12 +960,10 @@ router.delete('/admin/dnc/:id', requireAdminKey, async (req, res) => {
   res.json({ removed: true });
 });
 
-// Record consent (e.g. verbal opt-in captured on a call)
 router.post('/api/consent', requireAdminKey, async (req, res) => {
   const { leadId, phone, channel = 'sms', granted = true, consentType, proofText, source } = req.body || {};
   if (!phone && !leadId) return res.status(400).json({ error: 'leadId or phone required' });
   const event = await recordConsent({ leadId, phone: phone ? formatPhoneE164(phone) : null, channel, granted, consentType, proofText, source }, 'admin');
-  // Consent may release a held lead
   if (granted && leadId) {
     await prisma.lead.updateMany({ where: { id: leadId, complianceStatus: 'hold' }, data: { complianceStatus: 'clear', complianceNotes: 'Consent recorded — hold released' } });
   }
