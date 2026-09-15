@@ -1,0 +1,61 @@
+{
+  "sequence": "annuity_drip_v1",
+  "trigger": "annuity lead imported or created without call consent (consumer list, referral no-consent)",
+  "stop_conditions": [
+    "any human reply -> stop automation, alert Dave, human takes over",
+    "opt-out / STOP -> DNC hard stop via lib/compliance addToDnc",
+    "consent granted -> eligible for Vapi follow-up (handled outside sequence)"
+  ],
+  "identity": "From: David Hughes Insurance <david@nexusgpartners.net> · SMS from approved Brevo sender. Sign all: - David Hughes, David Hughes Insurance",
+  "compliance_note": "EMAIL-FIRST. Consumer leads get no AI-voice cold call until prior express consent is on file. SMS steps still require consent per TCPA — engine holds SMS without it, so early steps are email-only.",
+  "steps": [
+    {
+      "day": 0,
+      "delay_hours": 1,
+      "channel": "email",
+      "template": "intro",
+      "subject": "A question most people 10 years from retirement never get answered",
+      "body": "{first_name} - I'm David Hughes, a licensed insurance agent here in {state}. I work with people approaching retirement on one specific problem: making sure the money they've saved actually turns into income they can't outlive. No pitch in this email - just one question worth thinking about: if the market dropped 20% the year you retired, what happens to your income? If that answer is fuzzy, I can show you how fixed and indexed annuities take that risk off the table. Reply and I'll send a one-page explainer - no call required. - David Hughes, David Hughes Insurance"
+    },
+    {
+      "day": 3,
+      "channel": "email",
+      "template": "educate_sequence_risk",
+      "subject": "The retirement mistake that is hardest to undo",
+      "body": "{first_name} - it's called sequence-of-returns risk: retiring into a downturn forces you to sell low, and the portfolio never recovers even when the market does. It's the reason some retirees run out of money in a 'good' market decade. Annuities exist specifically to fence off a floor of income that markets can't touch. Worth a one-page walkthrough? Reply EXPLAINER and I'll send it. - David Hughes, David Hughes Insurance"
+    },
+    {
+      "day": 7,
+      "channel": "email",
+      "template": "rollover",
+      "subject": "Old 401(k)s: the most neglected money in America",
+      "body": "{first_name} - if you have a 401(k) or IRA sitting with an old employer, you have three choices: leave it (no control), roll it to an IRA (still market-exposed), or roll it into a fixed indexed annuity (market-linked upside, zero downside, income option later). Most people don't know option three exists. If you have an old account gathering dust, reply ROLLOVER and I'll price all three side by side. - David Hughes, David Hughes Insurance"
+    },
+    {
+      "day": 12,
+      "channel": "email",
+      "template": "credibility",
+      "subject": "Why I don't charge for this",
+      "body": "{first_name} - quick transparency: I'm compensated by the carriers, not by you, so a comparison quote costs you nothing. And I'm independent - not captive to one company - so I quote across carriers and show you the line items. If you'd like to see what guaranteed income your savings could buy, grab 10 minutes here: {booking_link} - David Hughes, David Hughes Insurance"
+    },
+    {
+      "day": 20,
+      "channel": "email",
+      "template": "breakup",
+      "subject": "Closing your file",
+      "body": "{first_name} - I don't chase people. If retirement income planning isn't on your radar right now, no problem at all - this is my last note. If it ever is, one reply reopens everything. And if you'd rather not hear from me again, reply STOP and you're off the list instantly. - David Hughes, David Hughes Insurance"
+    }
+  ],
+  "test_protocol": {
+    "subject": "Dave's own email as lead #1",
+    "how": [
+      "1. POST /api/annuity/leads with Dave's name, phone, gmail, state MI, consent false",
+      "2. Confirm day-0 email lands within ~1h and reads personal, not robotic",
+      "3. Confirm NO Vapi call fires (consent false = nurture only)",
+      "4. Re-post same lead with consent true - confirm Vapi call queues",
+      "5. POST /api/annuity/import with a 3-row test CSV incl. one DNC-listed phone - confirm it is blocked",
+      "6. Reply STOP to a test email - confirm DNC hard stop"
+    ],
+    "what_to_listen_for": "no consumer cold calls without consent, merge fields populated, STOP works"
+  }
+}
