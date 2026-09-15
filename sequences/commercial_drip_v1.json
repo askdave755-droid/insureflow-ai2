@@ -1,0 +1,53 @@
+{
+  "sequence": "commercial_drip_v1",
+  "trigger": "Apollo commercial lead with email enrolled (email-only mode — no phone reveal)",
+  "stop_conditions": [
+    "any human reply -> stop automation, alert Dave, human takes over",
+    "Brevo unsubscribe/spam complaint -> stop + DNC hard stop via /webhook/brevo",
+    "DNC entry added -> engine re-checks before every step"
+  ],
+  "identity": "From: David Hughes Insurance <BREVO_SENDER> · Sign all: - David Hughes, David Hughes Insurance",
+  "compliance_note": "B2B outreach to business decision-makers (owners/presidents of commercial operations). Email-only — no AI-voice cold call until engagement. Unsubscribe handled via Brevo webhook + DNC.",
+  "steps": [
+    {
+      "day": 0,
+      "delay_hours": 1,
+      "channel": "email",
+      "template": "intro",
+      "subject": "Quick question about {company}'s commercial auto renewal",
+      "body": "{first_name} - I'm David Hughes, an independent commercial insurance agent licensed in {state}. I work with {industry} operations on one thing: making sure they're not overpaying on commercial auto and liability at renewal. I quote across multiple carriers (Cover Whale, Nirvana, Forge, RT Connector and others) so you see the real spread - not just one company's number. No pitch in this email. Just a question: when does {company}'s current policy renew? Reply with the month and I'll tell you in one line whether it's worth a comparison. - David Hughes, David Hughes Insurance"
+    },
+    {
+      "day": 3,
+      "channel": "email",
+      "template": "coverage_gap",
+      "subject": "The gap I see most in {state} {industry} policies",
+      "body": "{first_name} - quick one. Most {industry} operations I quote in {state} have the same blind spot: the auto policy is fine, but the liability limits were set years ago when the business was smaller. One bad accident with today's equipment and payroll and the policy runs out before the lawyers do. Takes me 4 minutes to check your limits against what carriers are writing for your size operation right now. Worth a look? Reply YES and I'll send a one-page comparison - no call needed unless you want one. - David Hughes, David Hughes Insurance"
+    },
+    {
+      "day": 7,
+      "channel": "email",
+      "template": "credibility",
+      "subject": "Why a comparison quote costs you nothing",
+      "body": "{first_name} - transparency: I'm compensated by the carriers, not by you. I'm independent - not captive to one company - so when I quote, you see the line items from multiple carriers side by side. If your current policy is already the best deal, I'll tell you that too and you keep it with my blessing. If it's not, you switch at renewal with zero lapse. Either way you know. 10 minutes here if you want the comparison: {booking_link} - David Hughes, David Hughes Insurance"
+    },
+    {
+      "day": 14,
+      "channel": "email",
+      "template": "breakup",
+      "subject": "Closing your file",
+      "body": "{first_name} - I don't chase people. If commercial insurance isn't on your radar right now, no problem - this is my last note. When renewal comes around, one reply reopens everything and I'll have the comparison ready in a day. If you'd rather not hear from me at all, reply STOP and you're off the list instantly. - David Hughes, David Hughes Insurance"
+    }
+  ],
+  "test_protocol": {
+    "subject": "Dave's own email as lead #1",
+    "how": [
+      "1. Enroll a test lead (Dave's gmail, company 'Test Trucking Co', state MI) via orchestrator or manual enroll",
+      "2. Confirm day-0 email lands within ~1h, merge fields populated (name, company, industry, state)",
+      "3. Confirm NO Vapi call fires (email-only mode)",
+      "4. Send a test Brevo webhook event (opened) -> confirm engagement logged + Dave alerted",
+      "5. Send a reply event -> confirm drip stops + Dave gets SMS alert"
+    ],
+    "what_to_listen_for": "merge fields populated, no calls fire, engagement alerts reach Dave"
+  }
+}
