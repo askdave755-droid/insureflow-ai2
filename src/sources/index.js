@@ -5,6 +5,7 @@ const path = require('path');
 const SftpClient = require('ssh2-sftp-client');
 const config = require('../config');
 const { formatPhoneE164 } = require('../lib/validate');
+const prisma = require('../db');
 
 // ─── APOLLO.IO API ───
 // Current spec (2025-2026):
@@ -15,11 +16,24 @@ const { formatPhoneE164 } = require('../lib/validate');
 //             Returns emails/phones; reveal_phone_number requires a webhook_url and a
 //             paid plan, so we only use synchronously returned data and handle
 //             402/403 (plan limits) gracefully.
+//
+// 2026-09-15 PATCH:
+//   1. Pagination — caller passes a page cursor so we stop re-pulling page 1 forever.
+//   2. Dedupe BEFORE enrich — search results are filtered against the leads table
+//      by name+company BEFORE any paid enrichment credits are spent.
+//   3. City-by-city targeting — one location per search with page cycling; caller
+//      rotates cities so we get depth (pages 1..N) per city instead of re-reading
+//      the same first page of a blended location string.
+//   4. Optional targeting overrides (titles/keywords) for non-trucking commercial lines.
 const APOLLO_HEADERS = () => ({
   'Content-Type': 'application/json',
   'Cache-Control': 'no-cache',
   'X-Api-Key': config.APOLLO_API_KEY
 });
+
+const DEFAULT_TITLES = ['Owner', 'President', 'CEO', 'Fleet Manager', 'Operations Manager'];
+const DEFAULT_KEYWORDS = 'trucking logistics freight transportation';
+const MAX_PAGES_PER_CALL = 3;
 
 function logApolloError(context, err) {
   const status = err.response?.status;
@@ -29,6 +43,68 @@ function logApolloError(context, err) {
   } else {
     console.error(`Apollo ${context} failed:`, status, JSON.stringify(data || err.message));
   }
+}
+
+// Check which candidate people already exist in the leads table — BEFORE spending
+// enrichment credits. Matches on phone (any status), or name+company, or email.
+// Search results rarely include contact info, so name+company does the heavy lifting.
+async function filterExistingPeople(people) {
+  if (!people.length) return [];
+
+  const names = people
+    .map(p => `${p.first_name || ''} ${p.last_name || ''}`.trim())
+    .filter(Boolean);
+  const emails = people.map(p => p.email).filter(Boolean);
+
+  const or = [];
+  if (emails.length) or.push({ email: { in: emails } });
+
+  // Pair each name with its own company (not full cross-product)
+  const pairs = people
+    .map(p => ({
+      name: `${p.first_name || ''} ${p.last_name || ''}`.trim(),
+      company: p.organization?.name
+    }))
+    .filter(x => x.name && x.company);
+  for (const pair of pairs.slice(0, 100)) {
+    or.push({ AND: [{ name: pair.name }, { company: pair.company }] });
+  }
+  // Name-only fallback for people with no company in the result
+  const nameOnly = names.filter(n => !pairs.some(x => x.name === n));
+  for (const n of nameOnly.slice(0, 100)) {
+    or.push({ name: n });
+  }
+
+  if (!or.length) return people;
+
+  let existing;
+  try {
+    existing = await prisma.lead.findMany({
+      where: { OR: or },
+      select: { name: true, company: true, email: true }
+    });
+  } catch (err) {
+    console.error('Apollo dedupe query failed (continuing without dedupe):', err.message);
+    return people;
+  }
+
+  const existingEmails = new Set(existing.map(e => e.email).filter(Boolean));
+  const existingNameCo = new Set(
+    existing.map(e => `${(e.name || '').toLowerCase()}|${(e.company || '').toLowerCase()}`)
+  );
+  const existingNames = new Set(existing.map(e => (e.name || '').toLowerCase()));
+
+  const fresh = people.filter(p => {
+    const nm = `${p.first_name || ''} ${p.last_name || ''}`.trim().toLowerCase();
+    const co = (p.organization?.name || '').toLowerCase();
+    if (p.email && existingEmails.has(p.email)) return false;
+    if (co && existingNameCo.has(`${nm}|${co}`)) return false;
+    if (!co && nm && existingNames.has(nm)) return false;
+    return true;
+  });
+
+  console.log(`Apollo dedupe: ${people.length} found, ${people.length - fresh.length} already in DB, ${fresh.length} fresh`);
+  return fresh;
 }
 
 async function enrichApolloPeople(people) {
@@ -60,61 +136,88 @@ async function enrichApolloPeople(people) {
   return enriched;
 }
 
-async function fetchApolloContacts(state, city, limit = 100) {
-  if (!config.APOLLO_API_KEY) return [];
+// Fetch contacts for ONE city, walking pages starting at startPage.
+// Returns { leads, nextPage, exhausted } so the caller can persist the cursor.
+async function fetchApolloContacts(state, city, limit = 100, opts = {}) {
+  if (!config.APOLLO_API_KEY) return { leads: [], nextPage: 1, exhausted: true };
 
-  try {
-    const response = await axios.post(
-      'https://api.apollo.io/api/v1/mixed_people/api_search',
-      {
-        person_titles: ['Owner', 'President', 'CEO', 'Fleet Manager', 'Operations Manager'],
-        person_locations: [`${city}, ${state}, US`],
-        q_keywords: 'trucking logistics freight transportation',
-        per_page: Math.min(limit, 100),
-        page: 1
-      },
-      { headers: APOLLO_HEADERS(), timeout: 15000 }
-    );
+  const titles = (opts.titles && opts.titles.length) ? opts.titles : DEFAULT_TITLES;
+  const keywords = opts.keywords || DEFAULT_KEYWORDS;
+  const insuranceType = opts.insuranceType || 'commercial_auto';
+  const perPage = Math.min(limit, 100);
+  let page = Math.max(opts.startPage || 1, 1);
+  const maxPage = page + MAX_PAGES_PER_CALL - 1;
 
-    const people = response.data.people || [];
-    if (!people.length) {
-      console.log(`Apollo search: 0 results for ${city}, ${state}`);
-      return [];
+  const collected = [];
+  let exhausted = false;
+
+  while (page <= maxPage && collected.length < limit) {
+    let people;
+    try {
+      const response = await axios.post(
+        'https://api.apollo.io/api/v1/mixed_people/api_search',
+        {
+          person_titles: titles,
+          person_locations: [`${city}, ${state}, US`],
+          q_keywords: keywords,
+          per_page: perPage,
+          page
+        },
+        { headers: APOLLO_HEADERS(), timeout: 15000 }
+      );
+      people = response.data.people || [];
+    } catch (error) {
+      console.error('Apollo fetch failed:', error.response?.status, JSON.stringify(error.response?.data || error.message));
+      break;
     }
 
-    // Search results don't include phones/emails — enrich to get them.
-    const enriched = await enrichApolloPeople(people);
+    if (!people.length) {
+      console.log(`Apollo search: 0 results for ${city}, ${state} page ${page} — city exhausted`);
+      exhausted = true;
+      break;
+    }
 
-    const leads = people.map(p => {
-      const e = enriched.get(p.id) || {};
-      const phone = formatPhoneE164(
-        e.phone_numbers?.[0]?.sanitized_number ||
-        e.phone_numbers?.[0]?.raw_number ||
-        e.organization?.primary_phone?.sanitized_number ||
-        e.organization?.phone ||
-        p.organization?.primary_phone?.sanitized_number ||
-        p.organization?.phone
-      );
-      return {
-        name: `${p.first_name || ''} ${p.last_name || e.last_name || ''}`.trim(),
-        phone,
-        email: e.email || p.email,
-        company: p.organization?.name || e.organization?.name,
-        title: p.title || e.title,
-        state,
-        city,
-        source: 'apollo',
-        insuranceType: 'commercial_auto',
-        industry: p.organization?.industry || e.organization?.industry
-      };
-    }).filter(l => l.phone && l.name);
-
-    console.log(`Apollo search: ${people.length} found, ${leads.length} with phone for ${city}, ${state}`);
-    return leads;
-  } catch (error) {
-    console.error('Apollo fetch failed:', error.response?.status, JSON.stringify(error.response?.data || error.message));
-    return [];
+    collected.push(...people);
+    if (people.length < perPage) { exhausted = true; break; } // last page
+    page++;
   }
+
+  if (!collected.length) {
+    return { leads: [], nextPage: page, exhausted };
+  }
+
+  // Dedupe BEFORE spending enrichment credits
+  const fresh = await filterExistingPeople(collected);
+
+  // Enrich only fresh people to get emails/phones
+  const enriched = await enrichApolloPeople(fresh);
+
+  const leads = fresh.map(p => {
+    const e = enriched.get(p.id) || {};
+    const phone = formatPhoneE164(
+      e.phone_numbers?.[0]?.sanitized_number ||
+      e.phone_numbers?.[0]?.raw_number ||
+      e.organization?.primary_phone?.sanitized_number ||
+      e.organization?.phone ||
+      p.organization?.primary_phone?.sanitized_number ||
+      p.organization?.phone
+    );
+    return {
+      name: `${p.first_name || ''} ${p.last_name || e.last_name || ''}`.trim(),
+      phone,
+      email: e.email || p.email,
+      company: p.organization?.name || e.organization?.name,
+      title: p.title || e.title,
+      state,
+      city,
+      source: 'apollo',
+      insuranceType,
+      industry: p.organization?.industry || e.organization?.industry
+    };
+  }).filter(l => l.phone && l.name);
+
+  console.log(`Apollo search: ${city}, ${state} — ${collected.length} pulled, ${fresh.length} fresh, ${leads.length} with phone (pages through ${page - 1}${exhausted ? ', exhausted' : ''})`);
+  return { leads, nextPage: page, exhausted };
 }
 
 // ─── FMCSA API ───
@@ -130,25 +233,25 @@ async function fetchFMCSANewFilings(state) {
 // ─── leO SFTP AUTO-IMPORT ───
 async function fetchLeOFromSFTP() {
   if (!config.LEO_SFTP_HOST) return [];
-  
+
   const sftp = new SftpClient();
   const leads = [];
-  
+
   try {
     await sftp.connect({
       host: config.LEO_SFTP_HOST,
       username: config.LEO_SFTP_USER,
       password: config.LEO_SFTP_PASS
     });
-    
+
     const files = await sftp.list('/exports');
     const csvFiles = files.filter(f => f.name.endsWith('.csv'));
-    
+
     for (const file of csvFiles) {
       const remotePath = `/exports/${file.name}`;
       const localPath = path.join('/tmp', file.name);
       await sftp.get(remotePath, localPath);
-      
+
       // Parse CSV
       await new Promise((resolve, reject) => {
         fs.createReadStream(localPath)
@@ -156,7 +259,7 @@ async function fetchLeOFromSFTP() {
           .on('data', (row) => {
             const phone = formatPhoneE164(row.phone || row.Phone || row.PHONE);
             if (!phone) return;
-            
+
             leads.push({
               name: `${row.first_name || row.FirstName || ''} ${row.last_name || row.LastName || ''}`.trim(),
               phone,
@@ -179,17 +282,17 @@ async function fetchLeOFromSFTP() {
           .on('end', resolve)
           .on('error', reject);
       });
-      
+
       // Archive processed file
       await sftp.rename(remotePath, `/exports/processed/${file.name}`);
       fs.unlinkSync(localPath);
     }
-    
+
     await sftp.end();
   } catch (error) {
     console.error('leO SFTP failed:', error.message);
   }
-  
+
   return leads;
 }
 
