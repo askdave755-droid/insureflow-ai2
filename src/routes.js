@@ -20,6 +20,7 @@ const config = require('./config');
 const { requireAdminKey, verifyVapiWebhook, verifyPhantomWebhook, actorFromRequest } = require('./lib/auth');
 const { auditMiddleware, audit } = require('./lib/audit');
 const { checkContactPermission, addToDnc, recordConsent } = require('./lib/compliance');
+const { handleBrevoEvent, handleApolloPhoneWebhook, recentEngagement } = require('./lib/engagement');
 
 const router = express.Router();
 router.use(auditMiddleware());
@@ -652,6 +653,7 @@ router.post('/webhook/phantom', verifyPhantomWebhook, async (req, res) => {
           }
         } catch (err) {
           console.error('❌ Phantom fetch-output failed:', err.response?.status, err.response?.data || err.message);
+          // Still 200 — don't let Phantom retry-storm us
           return res.json({ received: true, processed: 0, queued: 0, reason: 'fetch-output error', error: err.message });
         }
       } else {
@@ -723,6 +725,57 @@ router.post('/webhook/phantom', verifyPhantomWebhook, async (req, res) => {
   } catch (error) {
     console.error('❌ Phantom webhook error:', error);
     res.status(200).json({ received: true, queued: 0, error: error.message });
+  }
+});
+
+// ─── BREVO ENGAGEMENT WEBHOOK ───
+// Set the webhook URL in Brevo (Transactional > Webhooks) to:
+//   {BASE_URL}/webhook/brevo?secret={BREVO_WEBHOOK_SECRET}
+// Opens/clicks escalate engaged email-only leads: Dave gets alerted, Apollo
+// phone reveal fires, Brady calls once a number lands.
+router.post('/webhook/brevo', async (req, res) => {
+  if (config.BREVO_WEBHOOK_SECRET && req.query.secret !== config.BREVO_WEBHOOK_SECRET) {
+    return res.status(401).json({ error: 'Invalid webhook secret' });
+  }
+  if (!config.BREVO_WEBHOOK_SECRET) {
+    console.warn('⚠️ BREVO_WEBHOOK_SECRET not set — /webhook/brevo is unauthenticated');
+  }
+  try {
+    // Brevo may batch or send single events — normalize to array
+    const events = Array.isArray(req.body) ? req.body : [req.body];
+    const results = [];
+    for (const evt of events) {
+      results.push(await handleBrevoEvent(evt));
+    }
+    res.json({ received: true, results });
+  } catch (error) {
+    console.error('❌ Brevo webhook error:', error);
+    res.status(200).json({ received: true, error: error.message });
+  }
+});
+
+// ─── APOLLO PHONE-REVEAL WEBHOOK ───
+// engagement.js passes ?leadId= in the webhook_url so matching is exact.
+router.post('/webhook/apollo/phones', async (req, res) => {
+  if (config.APOLLO_WEBHOOK_SECRET && req.query.secret !== config.APOLLO_WEBHOOK_SECRET) {
+    return res.status(401).json({ error: 'Invalid webhook secret' });
+  }
+  try {
+    const result = await handleApolloPhoneWebhook(req.body, req.query.leadId || null);
+    res.json({ received: true, ...result });
+  } catch (error) {
+    console.error('❌ Apollo phone webhook error:', error);
+    res.status(200).json({ received: true, error: error.message });
+  }
+});
+
+// ─── ENGAGEMENT FEED (admin, phone-viewable) ───
+router.get('/admin/engagement', requireAdminKey, async (req, res) => {
+  try {
+    const rows = await recentEngagement(parseInt(req.query.limit || '100'));
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
