@@ -43,6 +43,11 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 // Static dashboard
 app.use(express.static('public'));
 
+// Test route to verify router mounting
+app.get('/test-router', (req, res) => {
+  res.json({ test: true, message: 'If you see this, express app is working' });
+});
+
 // Routes
 app.use(routes);
 
