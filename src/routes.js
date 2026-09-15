@@ -776,10 +776,9 @@ router.get('/admin/status', requireAdminKey, async (req, res) => {
 
 // ─── APOLLO SMOKE TEST (phone-friendly) ───
 // GET /admin/apollo/test?key=...&city=Detroit&state=MI
-// Runs ONE tiny Apollo pull (limit 5, single page) through the exact production
-// path (same env key, same code as the hourly orchestrator) and reports exactly
-// what comes back: result counts, cursor, and a sample. Use this to verify the
-// plan upgrade unlocked api_search without waiting for the cron.
+// Runs a raw Apollo search + one full production pull (limit 5, single page)
+// and reports exactly what comes back: total_entries, has_phone/has_email flags,
+// cursor, and a sample. Use this to verify the plan upgrade and diagnose query issues.
 router.get('/admin/apollo/test', requireAdminKey, async (req, res) => {
   const state = (req.query.state || 'MI').toUpperCase();
   const city = req.query.city || 'Detroit';
@@ -790,6 +789,21 @@ router.get('/admin/apollo/test', requireAdminKey, async (req, res) => {
 
   const started = Date.now();
   try {
+    // First: raw search call to see total_entries — tells us if Apollo matches ANYTHING
+    const searchResp = await axios.post(
+      'https://api.apollo.io/api/v1/mixed_people/api_search',
+      {
+        person_titles: ['Owner', 'President', 'CEO'],
+        person_locations: [`${city}, ${state}, US`],
+        per_page: 5,
+        page: 1
+      },
+      { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache', 'X-Api-Key': config.APOLLO_API_KEY }, timeout: 15000 }
+    );
+    const rawPeople = searchResp.data.people || [];
+    const totalEntries = searchResp.data.total_entries;
+
+    // Then: full production path
     const result = await fetchApolloContacts(state, city, 5, {
       startPage: 1,
       insuranceType: 'commercial_auto'
@@ -798,6 +812,14 @@ router.get('/admin/apollo/test', requireAdminKey, async (req, res) => {
     res.json({
       ok: true,
       query: { city, state },
+      rawSearch: {
+        totalEntries: totalEntries ?? null,
+        returned: rawPeople.length,
+        firstHasPhone: rawPeople[0] ? (rawPeople[0].has_direct_phone || null) : null,
+        firstHasEmail: rawPeople[0] ? (rawPeople[0].has_email ?? null) : null,
+        firstTitle: rawPeople[0]?.title || null,
+        firstOrg: rawPeople[0]?.organization?.name || null
+      },
       leadsReturned: result.leads.length,
       nextPage: result.nextPage,
       exhausted: result.exhausted,
@@ -809,9 +831,11 @@ router.get('/admin/apollo/test', requireAdminKey, async (req, res) => {
         hasEmail: !!l.email,
         title: l.title
       })),
-      note: result.leads.length === 0
-        ? 'Search reachable but no NEW phone-qualified people — either city exhausted, all results already in DB, or phones not revealed on this plan. Check Railway logs for the "Apollo search:" line.'
-        : 'Apollo api_search + enrichment pipeline working.'
+      note: (totalEntries ?? 0) === 0
+        ? 'Apollo search matched NOTHING (total_entries=0). Location or keyword combo is too narrow for their DB. Try broadening.'
+        : result.leads.length === 0
+          ? 'Apollo HAS matches (total_entries>0) but pipeline produced 0 phone-qualified leads. All results may already be in your DB, or phones not revealed on this plan.'
+          : 'Apollo api_search + enrichment pipeline working end-to-end.'
     });
   } catch (err) {
     res.json({
