@@ -8,6 +8,7 @@ const { formatPhoneE164, isBusinessHours, getNextBusinessTime } = require('./lib
 const { handleVapiWebhook } = require('./workers/callWorker');
 const { sendEmailBrevo } = require('./lib/messaging');
 const { enrichWithFMCSA } = require('./sources/fmcsa');
+const { fetchApolloContacts } = require('./sources');
 const { runIntelligence } = require('./lib/intel');
 const { promoteLead } = require('./lib/convert');
 const { assertTransition } = require('./lib/pipeline');
@@ -400,7 +401,7 @@ router.post('/api/submissions/:id/decline', requireAdminKey, async (req, res) =>
     where: { id: req.params.id },
     data: { status: 'DECLINED', declinedReason: reason || null, respondedAt: new Date() }
   });
-  await req.audit({ actor: actorFromRequest(req, 'admin'), action: 'stage_change', entityType: 'Submission', entityId: submission.id, before: { status: before.status }, after: { status: 'DECLINED', reason } });
+  await req.audit({ actor: 'admin', action: 'stage_change', entityType: 'Submission', entityId: submission.id, before: { status: before.status }, after: { status: 'DECLINED', reason } });
   res.json({ success: true, submission });
 });
 
@@ -771,6 +772,56 @@ router.get('/admin/status', requireAdminKey, async (req, res) => {
     today: stats || { leadsIngested: 0, callsMade: 0, qualified: 0 },
     system: 'operational'
   });
+});
+
+// ─── APOLLO SMOKE TEST (phone-friendly) ───
+// GET /admin/apollo/test?key=...&city=Detroit&state=MI
+// Runs ONE tiny Apollo pull (limit 5, single page) through the exact production
+// path (same env key, same code as the hourly orchestrator) and reports exactly
+// what comes back: result counts, cursor, and a sample. Use this to verify the
+// plan upgrade unlocked api_search without waiting for the cron.
+router.get('/admin/apollo/test', requireAdminKey, async (req, res) => {
+  const state = (req.query.state || 'MI').toUpperCase();
+  const city = req.query.city || 'Detroit';
+
+  if (!config.APOLLO_API_KEY) {
+    return res.json({ ok: false, reason: 'APOLLO_API_KEY not set in env' });
+  }
+
+  const started = Date.now();
+  try {
+    const result = await fetchApolloContacts(state, city, 5, {
+      startPage: 1,
+      insuranceType: 'commercial_auto'
+    });
+    const elapsed = Date.now() - started;
+    res.json({
+      ok: true,
+      query: { city, state },
+      leadsReturned: result.leads.length,
+      nextPage: result.nextPage,
+      exhausted: result.exhausted,
+      elapsedMs: elapsed,
+      sample: result.leads.slice(0, 3).map(l => ({
+        name: l.name,
+        company: l.company,
+        hasPhone: !!l.phone,
+        hasEmail: !!l.email,
+        title: l.title
+      })),
+      note: result.leads.length === 0
+        ? 'Search reachable but no NEW phone-qualified people — either city exhausted, all results already in DB, or phones not revealed on this plan. Check Railway logs for the "Apollo search:" line.'
+        : 'Apollo api_search + enrichment pipeline working.'
+    });
+  } catch (err) {
+    res.json({
+      ok: false,
+      query: { city, state },
+      httpStatus: err.response?.status || null,
+      apolloError: err.response?.data || null,
+      message: err.message
+    });
+  }
 });
 
 // ─── COST DASHBOARD ───
