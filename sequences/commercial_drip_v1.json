@@ -1,13 +1,14 @@
 {
   "sequence": "commercial_drip_v1",
-  "trigger": "Apollo commercial lead with email enrolled (email-only mode — no phone reveal)",
+  "trigger": "Apollo commercial lead with email but no phone (email-only lane) — enrolled by orchestrator at ingestion",
   "stop_conditions": [
     "any human reply -> stop automation, alert Dave, human takes over",
-    "Brevo unsubscribe/spam complaint -> stop + DNC hard stop via /webhook/brevo",
-    "DNC entry added -> engine re-checks before every step"
+    "Brevo unsubscribe/spam event -> DNC hard stop via /webhook/brevo",
+    "hard bounce -> lead marked bounced, sequence stops",
+    "engagement escalation (click / 3+ opens) -> Dave alerted, phone reveal attempted, Brady calls once a number lands"
   ],
-  "identity": "From: David Hughes Insurance <BREVO_SENDER> · Sign all: - David Hughes, David Hughes Insurance",
-  "compliance_note": "B2B outreach to business decision-makers (owners/presidents of commercial operations). Email-only — no AI-voice cold call until engagement. Unsubscribe handled via Brevo webhook + DNC.",
+  "identity": "From: David Hughes Insurance <david@nexusgpartners.net>. Sign all: - David Hughes, David Hughes Insurance",
+  "compliance_note": "B2B cold email under CAN-SPAM: real identity, real subject lines, working opt-out in every touch. No AI-voice cold call on these leads until they engage AND a phone number is revealed — then it's a warm follow-up, compliance-gated like any call.",
   "steps": [
     {
       "day": 0,
@@ -15,39 +16,45 @@
       "channel": "email",
       "template": "intro",
       "subject": "Quick question about {company}'s commercial auto renewal",
-      "body": "{first_name} - I'm David Hughes, an independent commercial insurance agent licensed in {state}. I work with {industry} operations on one thing: making sure they're not overpaying on commercial auto and liability at renewal. I quote across multiple carriers (Cover Whale, Nirvana, Forge, RT Connector and others) so you see the real spread - not just one company's number. No pitch in this email. Just a question: when does {company}'s current policy renew? Reply with the month and I'll tell you in one line whether it's worth a comparison. - David Hughes, David Hughes Insurance"
+      "body": "{first_name} - I'm David Hughes, an independent commercial insurance agent licensed in {state}. I work with trucking and fleet owners on one thing: making sure the renewal number doesn't quietly creep up year over year. Most owners I talk to haven't had a real market comparison in 2-3 years - not because they don't care, but because nobody offered one. If your renewal is anywhere in the next 6 months, a comparison costs you nothing and takes about 4 minutes of your time. Reply with your renewal month and I'll tell you honestly whether it's worth quoting. - David Hughes, David Hughes Insurance"
     },
     {
       "day": 3,
       "channel": "email",
-      "template": "coverage_gap",
-      "subject": "The gap I see most in {state} {industry} policies",
-      "body": "{first_name} - quick one. Most {industry} operations I quote in {state} have the same blind spot: the auto policy is fine, but the liability limits were set years ago when the business was smaller. One bad accident with today's equipment and payroll and the policy runs out before the lawyers do. Takes me 4 minutes to check your limits against what carriers are writing for your size operation right now. Worth a look? Reply YES and I'll send a one-page comparison - no call needed unless you want one. - David Hughes, David Hughes Insurance"
+      "template": "pain_point",
+      "subject": "The 90-day window most owners miss",
+      "body": "{first_name} - one pattern I see constantly with operations like {company}: the renewal packet shows up 30 days before expiration, and by then there's no time to shop it properly. The carriers know this - it's priced in. The owners who get the best numbers start comparing 90+ days out, when underwriters actually compete. If your renewal is inside that window, I can still look - but the earlier the better. What month does your policy renew? - David Hughes, David Hughes Insurance"
     },
     {
       "day": 7,
       "channel": "email",
       "template": "credibility",
-      "subject": "Why a comparison quote costs you nothing",
-      "body": "{first_name} - transparency: I'm compensated by the carriers, not by you. I'm independent - not captive to one company - so when I quote, you see the line items from multiple carriers side by side. If your current policy is already the best deal, I'll tell you that too and you keep it with my blessing. If it's not, you switch at renewal with zero lapse. Either way you know. 10 minutes here if you want the comparison: {booking_link} - David Hughes, David Hughes Insurance"
+      "subject": "Why independent matters for commercial auto",
+      "body": "{first_name} - quick transparency on how I work: I'm independent, not captive to one carrier, so I quote across markets - Cover Whale, Nirvana, Forge and others depending on your state and fleet. I'm paid by the carriers, not by you, so a comparison costs you nothing. And I'll tell you straight if your current number is already good - it happens, and I'd rather earn the account later than waste your time now. Worth a look? Grab 4 minutes here: {booking_link} - David Hughes, David Hughes Insurance"
     },
     {
-      "day": 14,
+      "day": 12,
+      "channel": "email",
+      "template": "soft_cta",
+      "subject": "What I'd need for a real number on {company}",
+      "body": "{first_name} - if you're even a little curious, here's all it takes for a real comparison: your current policy's declarations page, a driver list, and your loss runs if you have them. With those, I can usually tell you within 48 hours whether there's money on the table. No obligation - worst case, you find out your current program is solid, which is worth knowing too. Reply here or grab a slot: {booking_link} - David Hughes, David Hughes Insurance"
+    },
+    {
+      "day": 20,
       "channel": "email",
       "template": "breakup",
       "subject": "Closing your file",
-      "body": "{first_name} - I don't chase people. If commercial insurance isn't on your radar right now, no problem - this is my last note. When renewal comes around, one reply reopens everything and I'll have the comparison ready in a day. If you'd rather not hear from me at all, reply STOP and you're off the list instantly. - David Hughes, David Hughes Insurance"
+      "body": "{first_name} - I don't chase owners who aren't interested. If the timing is wrong or you're happy with your current agent, no problem at all - this is my last note. If the renewal number ever surprises you, one reply reopens everything. And if you'd rather not hear from me again, reply STOP and you're off the list instantly. - David Hughes, David Hughes Insurance"
     }
   ],
   "test_protocol": {
-    "subject": "Dave's own email as lead #1",
     "how": [
-      "1. Enroll a test lead (Dave's gmail, company 'Test Trucking Co', state MI) via orchestrator or manual enroll",
-      "2. Confirm day-0 email lands within ~1h, merge fields populated (name, company, industry, state)",
-      "3. Confirm NO Vapi call fires (email-only mode)",
-      "4. Send a test Brevo webhook event (opened) -> confirm engagement logged + Dave alerted",
-      "5. Send a reply event -> confirm drip stops + Dave gets SMS alert"
+      "1. Add Dave's gmail as an Apollo-style lead (email only, no phone) via POST /api/leads",
+      "2. Enroll in commercial_drip_v1 and confirm day-0 email lands within ~1h",
+      "3. Click the booking link in the email -> confirm /webhook/brevo logs the click, Dave gets the hot-lead alert, and a phone reveal is attempted",
+      "4. Send a fake unsubscribe event -> confirm DNC entry + sequence stops",
+      "5. Confirm NO Vapi call fires while the lead has no phone"
     ],
-    "what_to_listen_for": "merge fields populated, no calls fire, engagement alerts reach Dave"
+    "what_to_listen_for": "merge fields populated ({company}, {first_name}), booking link correct, STOP works, engagement alert reaches Dave"
   }
 }

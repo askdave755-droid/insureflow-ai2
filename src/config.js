@@ -84,6 +84,14 @@ module.exports = {
   PHANTOM_WEBHOOK_SECRET: process.env.PHANTOM_WEBHOOK_SECRET,
   PHANTOM_API_KEY: process.env.PHANTOM_API_KEY,
 
+  // ─── ENGAGEMENT WEBHOOKS (Sept 2026) ───
+  // Brevo sends open/click events to /webhook/brevo (set the webhook URL in the
+  // Brevo dashboard with ?secret= appended). Apollo posts revealed phone numbers
+  // to /webhook/apollo/phones — webhook_url is passed per-request by engagement.js.
+  BREVO_WEBHOOK_SECRET: process.env.BREVO_WEBHOOK_SECRET,
+  APOLLO_WEBHOOK_SECRET: process.env.APOLLO_WEBHOOK_SECRET,
+  DAVE_ALERT_EMAIL: process.env.DAVE_ALERT_EMAIL,
+
   STATE_CONFIG,
   ALLOWED_STATES,
   CALL_HOURS

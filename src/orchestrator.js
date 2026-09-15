@@ -19,10 +19,13 @@ const config = require('./config');
 //     metros query the niche commercial lines from nexusgpartners.net (contractors,
 //     restaurants, childcare, home health, auto repair, etc.).
 //
-// 2026-09-15 PATCH 2 — email-only lane (reverted to stable version):
-//   The email-only drip enroll is commented out pending a boot-crash fix.
-//   Apollo leads with phones still queue for calls. Email-only leads are
-//   stored in the DB but not yet enrolled in the drip — next patch.
+// 2026-09-15 PATCH 3 — email-only lane LIVE:
+//   Apollo leads with phones queue for Brady calls as before. Email-only leads
+//   are enrolled in sequences/commercial_drip_v1.json via a lazy require inside
+//   the loop (sequence engine stays off the boot path; failures are caught and
+//   logged, never crash ingestion). Engagement (opens/clicks) is handled by
+//   /webhook/brevo -> lib/engagement.js: Dave gets alerted and an Apollo phone
+//   reveal is attempted; once a number lands, Brady calls the warm lead.
 const SOURCES = [
   // ── Michigan (resident) ──
   { state: 'MI', city: 'Detroit',        keywords: 'trucking logistics freight transportation manufacturing', titles: ['Owner', 'President', 'CEO', 'Fleet Manager', 'Operations Manager'] },
@@ -161,8 +164,19 @@ async function ingestAndQueue() {
         });
         queued++;
       } else if (lead.email) {
-        // Email-only — store for drip (enrollment coming in next patch)
-        console.log(`📧 Email-only lead stored: ${lead.name} <${lead.email}> (${lead.company || 'no company'})`);
+        // Email-only — enroll in the commercial drip (B2B email, CAN-SPAM compliant).
+        // Lazy require keeps the sequence engine off the boot path; a drip failure
+        // must never kill ingestion, so this is wrapped in its own try/catch.
+        try {
+          const { enroll } = require('./lib/sequences');
+          await enroll(lead, 'commercial_drip_v1', {
+            company: lead.company || 'your company',
+            email: lead.email
+          });
+          console.log(`📧 Email-only lead enrolled in drip: ${lead.name} <${lead.email}> (${lead.company || 'no company'})`);
+        } catch (err) {
+          console.error(`⚠️ Drip enrollment failed for lead ${lead.id}: ${err.message}`);
+        }
         queued++;
       }
     } catch (leadErr) {
