@@ -9,56 +9,101 @@ const config = require('./config');
 
 // Licensed states only (MI resident; AZ/TN/FL active non-resident).
 // TX/GA/OH/IN removed — licenses expired/unverified as of Aug 2026.
+//
+// 2026-09-15 PATCH — deeper commercial coverage:
+//   - Expanded from 8 to 16 markets across the 4 licensed states.
+//   - Per-city Apollo page cursors (in-memory) so each hourly pull walks deeper
+//     into a city's results instead of re-reading page 1 forever.
+//   - Two cities pulled per run (rotating) instead of one — roughly 2x throughput.
+//   - Per-city targeting profiles: trucking hubs keep the trucking query; other
+//     metros query the niche commercial lines from nexusgpartners.net (contractors,
+//     restaurants, childcare, home health, auto repair, etc.).
 const SOURCES = [
-  { state: 'MI', city: 'Detroit' },
-  { state: 'MI', city: 'Grand Rapids' },
-  { state: 'MI', city: 'Lansing' },
-  { state: 'TN', city: 'Memphis' },
-  { state: 'TN', city: 'Nashville' },
-  { state: 'AZ', city: 'Phoenix' },
-  { state: 'AZ', city: 'Tucson' },
-  { state: 'FL', city: 'Jacksonville' },
-  { state: 'FL', city: 'Miami' },
+  // ── Michigan (resident) ──
+  { state: 'MI', city: 'Detroit',        keywords: 'trucking logistics freight transportation manufacturing', titles: ['Owner', 'President', 'CEO', 'Fleet Manager', 'Operations Manager'] },
+  { state: 'MI', city: 'Grand Rapids',   keywords: 'manufacturing contractor construction wholesale',       titles: ['Owner', 'President', 'CEO', 'Operations Manager'] },
+  { state: 'MI', city: 'Lansing',        keywords: 'contractor construction restaurant retail services',    titles: ['Owner', 'President', 'CEO'] },
+  { state: 'MI', city: 'Flint',          keywords: 'contractor auto repair trucking services',              titles: ['Owner', 'President', 'CEO'] },
+  // ── Tennessee ──
+  { state: 'TN', city: 'Memphis',        keywords: 'trucking logistics freight warehouse distribution',     titles: ['Owner', 'President', 'CEO', 'Fleet Manager', 'Operations Manager'] },
+  { state: 'TN', city: 'Nashville',      keywords: 'contractor construction restaurant hospitality',        titles: ['Owner', 'President', 'CEO', 'Operations Manager'] },
+  { state: 'TN', city: 'Knoxville',      keywords: 'contractor construction trucking services',             titles: ['Owner', 'President', 'CEO'] },
+  { state: 'TN', city: 'Chattanooga',    keywords: 'trucking logistics manufacturing contractor',           titles: ['Owner', 'President', 'CEO', 'Operations Manager'] },
+  // ── Arizona ──
+  { state: 'AZ', city: 'Phoenix',        keywords: 'contractor construction trucking landscaping',          titles: ['Owner', 'President', 'CEO', 'Operations Manager'] },
+  { state: 'AZ', city: 'Tucson',         keywords: 'contractor construction restaurant services',           titles: ['Owner', 'President', 'CEO'] },
+  { state: 'AZ', city: 'Mesa',           keywords: 'contractor construction auto repair retail',            titles: ['Owner', 'President', 'CEO'] },
+  { state: 'AZ', city: 'Scottsdale',     keywords: 'restaurant hospitality retail services',                titles: ['Owner', 'President', 'CEO'] },
+  // ── Florida ──
+  { state: 'FL', city: 'Jacksonville',   keywords: 'trucking logistics freight port contractor',            titles: ['Owner', 'President', 'CEO', 'Fleet Manager', 'Operations Manager'] },
+  { state: 'FL', city: 'Miami',          keywords: 'trucking logistics freight import export',              titles: ['Owner', 'President', 'CEO', 'Fleet Manager', 'Operations Manager'] },
+  { state: 'FL', city: 'Tampa',          keywords: 'contractor construction restaurant trucking',           titles: ['Owner', 'President', 'CEO', 'Operations Manager'] },
+  { state: 'FL', city: 'Orlando',        keywords: 'restaurant hospitality contractor services',            titles: ['Owner', 'President', 'CEO'] },
 ];
+
+// In-memory per-city Apollo page cursors ("city,state" -> next page to pull).
+// Resets on redeploy/restart, which just means a city re-scans from page 1 —
+// acceptable because dedupe now happens BEFORE paid enrichment, so re-scanning
+// costs zero credits.
+const apolloCursors = {};
+
+function nextSources(n) {
+  // Rotate through SOURCES, n cities per run, advancing by n each hour.
+  const base = (new Date().getHours() * n) % SOURCES.length;
+  const picked = [];
+  for (let i = 0; i < n; i++) {
+    picked.push(SOURCES[(base + i) % SOURCES.length]);
+  }
+  return picked;
+}
 
 async function ingestAndQueue() {
   console.log('🔄 Running lead ingestion...');
-  
+
   const allLeads = [];
-  
-  // Pull from Apollo, rotating city by hour
+
+  // Pull from Apollo — 2 cities per run, each walking its own page cursor
   if (config.APOLLO_API_KEY) {
-    const source = SOURCES[new Date().getHours() % SOURCES.length];
-    console.log(`🌆 Apollo pull: ${source.city}, ${source.state}`);
-    try {
-      const apollo = await fetchApolloContacts(source.state, source.city, 50);
-      allLeads.push(...apollo);
-    } catch (error) {
-      console.warn(`⚠️ Apollo pull failed: ${error.message}`);
+    for (const source of nextSources(2)) {
+      const key = `${source.city},${source.state}`;
+      const startPage = apolloCursors[key] || 1;
+      console.log(`🌆 Apollo pull: ${source.city}, ${source.state} (from page ${startPage})`);
+      try {
+        const result = await fetchApolloContacts(source.state, source.city, 50, {
+          startPage,
+          titles: source.titles,
+          keywords: source.keywords,
+          insuranceType: 'commercial_auto'
+        });
+        allLeads.push(...result.leads);
+        apolloCursors[key] = result.exhausted ? 1 : result.nextPage; // loop city when exhausted
+      } catch (error) {
+        console.warn(`⚠️ Apollo pull failed for ${key}: ${error.message}`);
+      }
     }
   }
-  
+
   if (config.LEO_SFTP_HOST) {
     const leo = await fetchLeOFromSFTP();
     allLeads.push(...leo);
   }
-  
+
   console.log(`📥 Ingested ${allLeads.length} leads`);
-  
+
   let queued = 0;
-  
+
   for (const leadData of allLeads) {
     // Skip if already exists
     const existing = await prisma.lead.findFirst({
       where: { phone: leadData.phone, status: { not: 'closed' } }
     });
     if (existing) continue;
-    
+
     // Validate state
     if (!config.ALLOWED_STATES.includes(leadData.state)) continue;
-    
+
     const lead = await prisma.lead.create({ data: leadData });
-    
+
     // FMCSA enrichment — best-effort, never blocks queueing
     try {
       const fmcsa = await enrichWithFMCSA({
@@ -75,7 +120,7 @@ async function ingestAndQueue() {
     } catch (err) {
       console.warn(`⚠️ FMCSA enrichment failed for lead ${lead.id}: ${err.message}`);
     }
-    
+
     // Phase 2 — score, tier, prioritize
     const intel = runIntelligence(lead);
     await prisma.lead.update({ where: { id: lead.id }, data: intel.updates });
@@ -87,28 +132,28 @@ async function ingestAndQueue() {
     }
 
     // Calculate call time
-    const delay = isBusinessHours(lead.state) 
-      ? 5000 
+    const delay = isBusinessHours(lead.state)
+      ? 5000
       : getNextBusinessTime(lead.state) - Date.now();
-    
+
     await callQueue.add('make-call', { leadId: lead.id }, {
       delay: Math.max(delay, 0),
       priority: intel.queue.bullPriority
     });
-    
+
     queued++;
   }
-  
+
   // Update daily stats
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  
+
   await prisma.dailyStat.upsert({
     where: { date: today },
     update: { leadsIngested: { increment: queued } },
     create: { date: today, leadsIngested: queued }
   });
-  
+
   console.log(`✅ Queued ${queued} leads for calling`);
 }
 
