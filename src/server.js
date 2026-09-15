@@ -1,5 +1,69 @@
 const express = require('express');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const config = require('./config');
+const routes = require('./routes');
+const prisma = require('./db');
+const pool = require('./lib/pool');
+const { attachCarrierRoutes } = require('./routes-carrier');
+const { attachLifeRoutes } = require('./routes-life');
+const { attachEventRoutes } = require('./routes-events');
+const { attachAnnuityRoutes } = require('./routes-annuity');
+
+// Temporarily disable workers to isolate boot crash
+// require('./orchestrator');
+// require('./life-feeder');   // automated HasData life/FE lead generation
+// require('./workers/callWorker');
+// require('./lib/sequences');   // registers the sequence-step Bull worker
+
 const app = express();
-app.get('/health', (req, res) => res.json({ status: 'ok', test: true }));
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Test server on ${PORT}`));
+
+// Security
+// NOTE: script-src allows 'unsafe-inline' because the Agency OS dashboard
+// (public/dashboard.html) is a single self-contained page with an inline
+// script — helmet's default CSP was blocking it (dead buttons). All other
+// helmet protections unchanged.
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+      'script-src': ["'self'", "'unsafe-inline'"]
+    }
+  }
+}));
+app.use(rateLimit({
+  windowMs: 1 * 60 * 1000,
+  max: 100,
+  message: { error: 'Too many requests' }
+}));
+
+// Body parsing
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Static dashboard
+app.use(express.static('public'));
+
+// Routes
+app.use(routes);
+
+// Carrier + Life + Event + Annuity routes expect a pg-style pool (shared shim in lib/pool.js)
+attachCarrierRoutes(app, pool);
+attachLifeRoutes(app, pool);
+attachEventRoutes(app, pool);
+attachAnnuityRoutes(app, pool);
+
+// Error handler
+app.use((err, req, res, next) => {
+  console.error('Server error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+const PORT = config.PORT;
+app.listen(PORT, () => {
+  console.log(`🚀 InsureFlowAI 2.0 running on port ${PORT}`);
+  console.log(`📊 Health: ${config.BASE_URL}/health`);
+  console.log(`💚 Life:   ${config.BASE_URL}/api/life/stats`);
+  console.log(`📈 Annuity: ${config.BASE_URL}/api/annuity/stats`);
+  console.log(`⏸️  Pause: ${config.BASE_URL}/admin/pause`);
+});
