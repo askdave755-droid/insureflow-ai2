@@ -9,6 +9,7 @@ const { attachCarrierRoutes } = require('./routes-carrier');
 const { attachLifeRoutes } = require('./routes-life');
 const { attachEventRoutes } = require('./routes-events');
 require('./orchestrator');
+require('./life-feeder');   // automated HasData life/FE lead generation
 require('./workers/callWorker');
 require('./lib/sequences');   // registers the sequence-step Bull worker
 
