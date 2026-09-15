@@ -35,6 +35,7 @@ const prisma = require('../db');
 //   6. last_name fix — api_search returns last_name_obfuscated ("Mo***s"), never
 //      last_name. All name construction and bulk_match now use it (asterisks stripped
 //      for display, raw form passed to bulk_match for matching).
+//   7. Debug logging at every stage of the pipeline to diagnose remaining gaps.
 const APOLLO_HEADERS = () => ({
   'Content-Type': 'application/json',
   'Cache-Control': 'no-cache',
@@ -188,6 +189,7 @@ async function fetchApolloContacts(state, city, limit = 100, opts = {}) {
         { headers: APOLLO_HEADERS(), timeout: 15000 }
       );
       people = response.data.people || [];
+      console.log(`Apollo search raw: ${city}, ${state} page ${page} — ${people.length} people, total_entries=${response.data.total_entries}, first has_phone=${people[0]?.has_direct_phone}, first org=${people[0]?.organization?.name}`);
     } catch (error) {
       console.error('Apollo fetch failed:', error.response?.status, JSON.stringify(error.response?.data || error.message));
       break;
@@ -210,9 +212,11 @@ async function fetchApolloContacts(state, city, limit = 100, opts = {}) {
 
   // Dedupe BEFORE spending enrichment credits
   const fresh = await filterExistingPeople(collected);
+  console.log(`Apollo post-dedupe: ${collected.length} collected -> ${fresh.length} fresh`);
 
   // Enrich only fresh people to get emails/phones
   const enriched = await enrichApolloPeople(fresh);
+  console.log(`Apollo post-enrich: ${fresh.length} fresh -> ${enriched.size} enriched matches`);
 
   const leads = fresh.map(p => {
     const e = enriched.get(p.id) || {};
@@ -236,7 +240,11 @@ async function fetchApolloContacts(state, city, limit = 100, opts = {}) {
       insuranceType,
       industry: p.organization?.industry || e.organization?.industry
     };
-  }).filter(l => l.phone && l.name);
+  }).filter(l => {
+    const keep = !!(l.phone && l.name);
+    if (!keep) console.log(`Apollo filtered out: name="${l.name}" phone=${l.phone || 'NONE'} email=${l.email || 'NONE'}`);
+    return keep;
+  });
 
   console.log(`Apollo search: ${city}, ${state} — ${collected.length} pulled, ${fresh.length} fresh, ${leads.length} with phone (pages through ${page - 1}${exhausted ? ', exhausted' : ''})`);
   return { leads, nextPage: page, exhausted };
