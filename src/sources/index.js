@@ -36,6 +36,11 @@ const prisma = require('../db');
 //      last_name. All name construction and bulk_match now use it (asterisks stripped
 //      for display, raw form passed to bulk_match for matching).
 //   7. Scope fix — debug log referenced `response` outside its try block (crash).
+//
+// 2026-09-15 PATCH 3 — email-only commercial lane:
+//   8. Lead filter now keeps leads with email OR phone (was phone-only, which dropped
+//      every Apollo lead since phone reveal isn't enabled on the Basic plan).
+//      Email-only leads go to the commercial_drip_v1 Brevo sequence in the orchestrator.
 const APOLLO_HEADERS = () => ({
   'Content-Type': 'application/json',
   'Cache-Control': 'no-cache',
@@ -243,12 +248,16 @@ async function fetchApolloContacts(state, city, limit = 100, opts = {}) {
       industry: p.organization?.industry || e.organization?.industry
     };
   }).filter(l => {
-    const keep = !!(l.phone && l.name);
+    // Email-only lane: keep leads with a phone OR an email (Apollo Basic doesn't
+    // return phones synchronously — email-only leads go to the commercial drip).
+    const keep = !!((l.phone || l.email) && l.name);
     if (!keep) console.log(`Apollo filtered out: name="${l.name}" phone=${l.phone || 'NONE'} email=${l.email || 'NONE'}`);
     return keep;
   });
 
-  console.log(`Apollo search: ${city}, ${state} — ${collected.length} pulled, ${fresh.length} fresh, ${leads.length} with phone (pages through ${page - 1}${exhausted ? ', exhausted' : ''})`);
+  const withPhone = leads.filter(l => l.phone).length;
+  const emailOnly = leads.filter(l => !l.phone && l.email).length;
+  console.log(`Apollo search: ${city}, ${state} — ${collected.length} pulled, ${fresh.length} fresh, ${leads.length} qualified (${withPhone} phone, ${emailOnly} email-only) (pages through ${page - 1}${exhausted ? ', exhausted' : ''})`);
   return { leads, nextPage: page, exhausted };
 }
 
