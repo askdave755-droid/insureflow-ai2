@@ -883,6 +883,143 @@ router.get('/admin/apollo/test', requireAdminKey, async (req, res) => {
   }
 });
 
+// ─── BREVO ENGAGEMENT WEBHOOK ───
+// POST /webhook/brevo — Brevo sends email events here (configured in Brevo
+// dashboard > Transactional > Webhooks). Events: opened, click, reply,
+// unsubscribed, spam, hard_bounce, soft_bounce, delivered.
+//
+// Behavior by event:
+//   opened / click        -> bump opportunityScore, log engagement, alert Dave on click
+//   reply                 -> STOP drip, flag lead HOT, SMS+email Dave immediately
+//   unsubscribed / spam   -> stop drip, add to DNC (hard stop)
+//   hard_bounce           -> mark email invalid, stop drip
+//
+// Auth: optional BREVO_WEBHOOK_SECRET checked as ?secret= query param.
+// Brevo doesn't sign webhooks natively, so the secret is appended to the
+// webhook URL in the Brevo dashboard (e.g. .../webhook/brevo?secret=xyz).
+router.post('/webhook/brevo', async (req, res) => {
+  try {
+    // Optional shared-secret check (set BREVO_WEBHOOK_SECRET in env)
+    if (process.env.BREVO_WEBHOOK_SECRET) {
+      const provided = req.query.secret || req.headers['x-brevo-secret'];
+      if (provided !== process.env.BREVO_WEBHOOK_SECRET) {
+        return res.status(401).json({ error: 'Invalid webhook secret' });
+      }
+    }
+
+    const events = Array.isArray(req.body) ? req.body : [req.body];
+    let processed = 0, alerts = 0, stopped = 0;
+
+    for (const evt of events) {
+      const eventType = (evt.event || '').toLowerCase();
+      const email = (evt.email || '').toLowerCase();
+      if (!email || !eventType) continue;
+
+      const lead = await prisma.lead.findFirst({
+        where: { email, status: { notIn: ['closed'] } },
+        orderBy: { createdAt: 'desc' }
+      });
+      if (!lead) continue;
+
+      const label = lead.company || lead.name;
+
+      if (eventType === 'opened' || eventType === 'open') {
+        // Bump engagement score slightly — cap to avoid inflation
+        await prisma.lead.update({
+          where: { id: lead.id },
+          data: { opportunityScore: Math.min((lead.opportunityScore || 0) + 2, 100) }
+        });
+        console.log(`📧 OPENED: ${label} <${email}>`);
+        processed++;
+      }
+
+      if (eventType === 'click') {
+        // Link click = high intent — alert Dave + bigger score bump
+        await prisma.lead.update({
+          where: { id: lead.id },
+          data: {
+            opportunityScore: Math.min((lead.opportunityScore || 0) + 10, 100),
+            scoreBand: 'HOT'
+          }
+        });
+        const link = evt.link || evt.url || 'a link';
+        const alertMsg = `🔥 CLICK: ${label} (${email}) just clicked ${link} in your drip email. Strike while it's hot.`;
+        try {
+          const { brevoSMS, brevoEmail } = require('./lib/brevo');
+          if (process.env.DAVE_ALERT_PHONE) await brevoSMS(process.env.DAVE_ALERT_PHONE, alertMsg);
+          await brevoEmail('askdave755@gmail.com', `🔥 Lead clicked: ${label}`, `<p>${alertMsg}</p><p>Lead ID: ${lead.id} · Phone: ${lead.phone || 'none'} · Company: ${label}</p>`);
+          alerts++;
+        } catch (alertErr) {
+          console.warn('⚠️ Click alert failed:', alertErr.message);
+        }
+        console.log(`📧 CLICKED: ${label} <${email}> -> ${link}`);
+        processed++;
+      }
+
+      if (eventType === 'reply') {
+        // Human replied — stop all automation, flag HOT, alert Dave NOW
+        try {
+          const { stopEnrollment } = require('./lib/sequences');
+          await stopEnrollment(lead.id, 'replied');
+        } catch (_) { /* sequence table may not exist yet */ }
+        await prisma.lead.update({
+          where: { id: lead.id },
+          data: { status: 'replied', scoreBand: 'HOT', opportunityScore: 100 }
+        });
+        const alertMsg = `💬 REPLY: ${label} (${email}) replied to your drip email. Check Brevo inbox and respond ASAP.`;
+        try {
+          const { brevoSMS, brevoEmail } = require('./lib/brevo');
+          if (process.env.DAVE_ALERT_PHONE) await brevoSMS(process.env.DAVE_ALERT_PHONE, alertMsg);
+          await brevoEmail('askdave755@gmail.com', `💬 Lead replied: ${label}`, `<p>${alertMsg}</p><p>Lead ID: ${lead.id} · Phone: ${lead.phone || 'none'} · Company: ${label}</p>`);
+          alerts++;
+        } catch (alertErr) {
+          console.warn('⚠️ Reply alert failed:', alertErr.message);
+        }
+        console.log(`📧 REPLIED: ${label} <${email}> — drip stopped, Dave alerted`);
+        stopped++;
+      }
+
+      if (eventType === 'unsubscribed' || eventType === 'spam') {
+        // Hard stop: DNC + stop drip
+        try {
+          const { stopEnrollment } = require('./lib/sequences');
+          await stopEnrollment(lead.id, eventType);
+        } catch (_) { /* ok */ }
+        try {
+          const { addToDnc } = require('./lib/compliance');
+          await addToDnc({ email, reason: `Brevo ${eventType}` }, 'webhook:brevo');
+        } catch (dncErr) {
+          console.warn('⚠️ DNC add failed:', dncErr.message);
+        }
+        await prisma.lead.update({
+          where: { id: lead.id },
+          data: { status: 'compliance_hold', complianceStatus: 'blocked', complianceNotes: `Brevo ${eventType}` }
+        });
+        console.log(`📧 ${eventType.toUpperCase()}: ${label} <${email}> — DNC + drip stopped`);
+        stopped++;
+      }
+
+      if (eventType === 'hard_bounce') {
+        try {
+          const { stopEnrollment } = require('./lib/sequences');
+          await stopEnrollment(lead.id, 'hard_bounce');
+        } catch (_) { /* ok */ }
+        await prisma.lead.update({
+          where: { id: lead.id },
+          data: { status: 'bounced' }
+        });
+        console.log(`📧 HARD BOUNCE: ${label} <${email}> — email invalid, drip stopped`);
+        stopped++;
+      }
+    }
+
+    res.json({ received: true, processed, alerts, stopped });
+  } catch (error) {
+    console.error('❌ Brevo webhook error:', error);
+    res.status(200).json({ received: true, error: error.message });
+  }
+});
+
 // ─── COST DASHBOARD ───
 router.get('/admin/costs', requireAdminKey, async (req, res) => {
   const costs = await prisma.cost.groupBy({
