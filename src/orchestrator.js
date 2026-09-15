@@ -120,7 +120,11 @@ async function ingestAndQueue() {
     if (!leadData.phone && !leadData.email) continue;
 
     const lead = await prisma.lead.create({
-      data: { ...leadData, status: leadData.phone ? 'pending' : 'drip' }
+      data: {
+        ...leadData,
+        phone: leadData.phone || '',  // schema patched to nullable; '' for backwards compat
+        status: leadData.phone ? 'pending' : 'drip'
+      }
     });
 
     // FMCSA enrichment — best-effort, never blocks queueing
