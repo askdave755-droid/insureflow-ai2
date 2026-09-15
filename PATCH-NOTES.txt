@@ -85,3 +85,47 @@ NOT IN THIS PATCH (next iterations)
 - Life dashboard section on Agency OS page
 - Rate-class pre-estimate (needs carrier rate tables)
 - Textract of spoken DOB (age is captured; full DOB is noisy in Vapi)
+
+═══════════════════════════════════════════════════════════════════
+ANNUITY VERTICAL PATCH NOTES
+Pushed: 2026-09-15 (branch: main)
+
+WHAT THIS ADDS
+A third pipeline — annuity — for CONSUMER retiree prospecting, built
+compliance-first (TCPA). Purchased consumer lists are imported, DNC
+screened, and routed to an email-first nurture drip. Vapi (AI voice)
+is deliberately gated OFF for consumer leads until consent exists.
+
+DECISIONS LOGGED (the "memory" for this vertical)
+- Data source for annuity prospects = CONSUMER LIST BROKERS
+  (Data Axle, LeadsPlease) filtered age 55/60+, homeowner, modeled
+  net worth. NOT HasData (that's businesses) and NOT Apollo (B2B).
+- First test = a $100-200, ~1,000-record Data Axle list in MI
+  (homeowners, 60+, $100k+ assets) before any larger spend.
+- Compliance lane: consumer annuity = email/mail + inbound callbacks.
+  AI-voice cold call to a consumer cell w/o written consent = TCPA
+  liability ($500-1,500/call). So autoCall is FORCED OFF on imports.
+- Agent-recruiting ("Automator+") feature was DISCUSSED and DEFERRED —
+  not part of the current model.
+
+NEW FILES
+- src/routes-annuity.js       Annuity endpoints (import, leads, stats)
+- sequences/annuity_drip_v1.json  5-touch email nurture drip
+
+PATCHED FILES
+- src/server.js               Mounts attachAnnuityRoutes, startup log line
+
+DATABASE
+- No migration. Reuses leads.vertical='annuity', native age column,
+  and industry column to carry the asset bracket (queryable).
+
+ENDPOINTS (all admin-key)
+POST /api/annuity/import      Bulk consumer CSV/JSON import + drip enroll
+POST /api/annuity/leads       Single lead; consent=true -> Vapi, else drip
+GET  /api/annuity/stats       Funnel counts + scored top prospects
+
+COMPLIANCE NOTES
+- Import path hard-blocks any phone/email already on internal DNC.
+- Sequence engine re-checks DNC before every touch; STOP kills instantly.
+- SMS steps still require consent per the compliance engine; early drip
+  steps are email-only by design.
