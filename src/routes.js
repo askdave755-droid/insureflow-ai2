@@ -803,7 +803,36 @@ router.get('/admin/apollo/test', requireAdminKey, async (req, res) => {
     const rawPeople = searchResp.data.people || [];
     const totalEntries = searchResp.data.total_entries;
 
-    // Then: full production path
+    // Then: walk the pipeline manually with debug capture
+    const { filterExistingPeople, enrichApolloPeople } = require('./sources');
+    const searchResp2 = await axios.post(
+      'https://api.apollo.io/api/v1/mixed_people/api_search',
+      {
+        person_titles: ['Owner', 'President', 'CEO', 'Fleet Manager', 'Operations Manager'],
+        person_locations: [`${city}, ${state}, US`],
+        q_keywords: 'trucking',
+        per_page: 5,
+        page: 1
+      },
+      { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache', 'X-Api-Key': config.APOLLO_API_KEY }, timeout: 15000 }
+    );
+    const pipelinePeople = searchResp2.data.people || [];
+    const fresh = await filterExistingPeople(pipelinePeople);
+    const enriched = await enrichApolloPeople(fresh);
+    const leadAttempts = fresh.map(p => {
+      const e = enriched.get(p.id) || {};
+      const phone = e.phone_numbers?.[0]?.sanitized_number || e.phone_numbers?.[0]?.raw_number || e.organization?.primary_phone?.sanitized_number || e.organization?.phone || p.organization?.primary_phone?.sanitized_number || p.organization?.phone;
+      return {
+        name: `${p.first_name || ''} ${(p.last_name || p.last_name_obfuscated || '').replace(/\*+/g, '')}`.trim(),
+        org: p.organization?.name,
+        hasEnrichMatch: enriched.has(p.id),
+        enrichPhone: e.phone_numbers?.[0]?.sanitized_number || null,
+        orgPhone: e.organization?.primary_phone?.sanitized_number || e.organization?.phone || p.organization?.primary_phone?.sanitized_number || p.organization?.phone || null,
+        enrichEmail: e.email || null,
+        finalPhone: phone || null
+      };
+    });
+
     const result = await fetchApolloContacts(state, city, 5, {
       startPage: 1,
       insuranceType: 'commercial_auto'
@@ -820,6 +849,12 @@ router.get('/admin/apollo/test', requireAdminKey, async (req, res) => {
         firstTitle: rawPeople[0]?.title || null,
         firstOrg: rawPeople[0]?.organization?.name || null
       },
+      pipelineDebug: {
+        searchReturned: pipelinePeople.length,
+        afterDedupe: fresh.length,
+        afterEnrich: enriched.size,
+        leadAttempts: leadAttempts.slice(0, 5)
+      },
       leadsReturned: result.leads.length,
       nextPage: result.nextPage,
       exhausted: result.exhausted,
@@ -834,7 +869,7 @@ router.get('/admin/apollo/test', requireAdminKey, async (req, res) => {
       note: (totalEntries ?? 0) === 0
         ? 'Apollo search matched NOTHING (total_entries=0). Location or keyword combo is too narrow for their DB. Try broadening.'
         : result.leads.length === 0
-          ? 'Apollo HAS matches (total_entries>0) but pipeline produced 0 phone-qualified leads. All results may already be in your DB, or phones not revealed on this plan.'
+          ? 'Apollo HAS matches (total_entries>0) but pipeline produced 0 phone-qualified leads. Check pipelineDebug for the exact break point.'
           : 'Apollo api_search + enrichment pipeline working end-to-end.'
     });
   } catch (err) {
