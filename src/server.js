@@ -13,7 +13,7 @@ const { attachAnnuityRoutes } = require('./routes-annuity');
 // Re-enable one at a time to isolate crash
 require('./orchestrator');
 require('./life-feeder');   // automated HasData life/FE lead generation
-// require('./workers/callWorker');
+require('./workers/callWorker');
 // require('./lib/sequences');
 
 const app = express();
