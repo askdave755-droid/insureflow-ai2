@@ -8,6 +8,7 @@ const pool = require('./lib/pool');
 const { attachCarrierRoutes } = require('./routes-carrier');
 const { attachLifeRoutes } = require('./routes-life');
 const { attachEventRoutes } = require('./routes-events');
+const { attachAnnuityRoutes } = require('./routes-annuity');
 require('./orchestrator');
 require('./life-feeder');   // automated HasData life/FE lead generation
 require('./workers/callWorker');
@@ -44,10 +45,11 @@ app.use(express.static('public'));
 // Routes
 app.use(routes);
 
-// Carrier + Life + Event routes expect a pg-style pool (shared shim in lib/pool.js)
+// Carrier + Life + Event + Annuity routes expect a pg-style pool (shared shim in lib/pool.js)
 attachCarrierRoutes(app, pool);
 attachLifeRoutes(app, pool);
 attachEventRoutes(app, pool);
+attachAnnuityRoutes(app, pool);
 
 // Error handler
 app.use((err, req, res, next) => {
@@ -60,5 +62,6 @@ app.listen(PORT, () => {
   console.log(`🚀 InsureFlowAI 2.0 running on port ${PORT}`);
   console.log(`📊 Health: ${config.BASE_URL}/health`);
   console.log(`💚 Life:   ${config.BASE_URL}/api/life/stats`);
+  console.log(`📈 Annuity: ${config.BASE_URL}/api/annuity/stats`);
   console.log(`⏸️  Pause: ${config.BASE_URL}/admin/pause`);
 });
