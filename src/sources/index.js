@@ -35,6 +35,7 @@ const prisma = require('../db');
 //   6. last_name fix — api_search returns last_name_obfuscated ("Mo***s"), never
 //      last_name. All name construction and bulk_match now use it (asterisks stripped
 //      for display, raw form passed to bulk_match for matching).
+//   7. Scope fix — debug log referenced `response` outside its try block (crash).
 const APOLLO_HEADERS = () => ({
   'Content-Type': 'application/json',
   'Cache-Control': 'no-cache',
@@ -172,6 +173,7 @@ async function fetchApolloContacts(state, city, limit = 100, opts = {}) {
 
   while (page <= maxPage && collected.length < limit) {
     let people;
+    let lastTotalEntries = null;
     try {
       // q_keywords: Apollo ANDs every word — a 4-word string kills all results.
       // Use only the first (most specific) word; the title filter does the rest.
@@ -188,12 +190,13 @@ async function fetchApolloContacts(state, city, limit = 100, opts = {}) {
         { headers: APOLLO_HEADERS(), timeout: 15000 }
       );
       people = response.data.people || [];
+      lastTotalEntries = response.data.total_entries ?? null;
     } catch (error) {
       console.error('Apollo fetch failed:', error.response?.status, JSON.stringify(error.response?.data || error.message));
       break;
     }
 
-    console.log(`Apollo search raw: ${city}, ${state} page ${page} — ${people.length} people, total_entries=${response.data.total_entries}, first has_phone=${people[0]?.has_direct_phone}, first org=${people[0]?.organization?.name}`);
+    console.log(`Apollo search raw: ${city}, ${state} page ${page} — ${people.length} people, total_entries=${lastTotalEntries}, first has_phone=${people[0]?.has_direct_phone}, first org=${people[0]?.organization?.name}`);
     if (!people.length) {
       console.log(`Apollo search: 0 results for ${city}, ${state} page ${page} — city exhausted`);
       exhausted = true;
