@@ -14,13 +14,13 @@ const config = require('./config');
  * Credit discipline (mirrors the Apollo dedupe-before-enrich fix):
  *   - Per-combo cursor kept in memory ('niche|city' -> start offset) so each run
  *     continues where that combo left off instead of re-scraping page 1 forever.
- *   - LIFE_DAILY_CAP env (default 120) stops the feeder for the day once that many
+ *   - LIFE_DAILY_CAP env (default 45) stops the feeder for the day once that many
  *     life leads exist, protecting both HasData credits and Vapi spend.
  *
  * Env:
  *   HASDATA_API_KEY    required (feeder no-ops without it)
  *   LIFE_FEED_ENABLE   '0' disables the cron (default on)
- *   LIFE_DAILY_CAP     max life leads per day (default 120)
+ *   LIFE_DAILY_CAP     max life leads per day (default 45 — sized to Vapi concurrency)
  */
 
 // FE/life niches that convert for small-business-owner life insurance.
@@ -41,7 +41,7 @@ const NICHES = [
 // Cities that have coordinates in lib/hasdata.js (licensed states only).
 const CITIES = Object.keys(CITY_COORDS);
 
-const DAILY_CAP = parseInt(process.env.LIFE_DAILY_CAP || '120', 10);
+const DAILY_CAP = parseInt(process.env.LIFE_DAILY_CAP || '45', 10);
 
 // Count today's life leads straight from the leads table — no extra table needed.
 async function getQueuedToday() {
@@ -96,7 +96,9 @@ async function feedLife() {
     cursors[key] = start + rows.length;
 
     if (stats.imported > 0) {
-      // Queue the fresh life leads for calling (90s spacing, business-hours enforced by worker)
+      // Queue the fresh life leads for calling (240s spacing — sized to Vapi
+      // concurrency so we don't hit the concurrent-call limit; business-hours
+      // enforced by worker)
       const fresh = await prisma.lead.findMany({
         where: { vertical: 'life_fe', source: 'hasdata_maps', status: 'pending' },
         orderBy: { createdAt: 'desc' },
@@ -105,7 +107,7 @@ async function feedLife() {
       });
       for (let i = 0; i < fresh.length; i++) {
         await callQueue.add('make-call', { leadId: fresh[i].id },
-          { delay: 5000 + i * 90000, priority: 5, jobId: 'life-' + fresh[i].id });
+          { delay: 5000 + i * 240000, priority: 5, jobId: 'life-' + fresh[i].id });
       }
       console.log(`💚 Life feeder: queued ${fresh.length} life leads for calling`);
     }
