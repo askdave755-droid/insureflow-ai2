@@ -5,6 +5,7 @@ const { fetchApolloContacts, fetchLeOFromSFTP } = require('./sources');
 const { enrichWithFMCSA } = require('./sources/fmcsa');
 const { isBusinessHours, getNextBusinessTime } = require('./lib/validate');
 const { runIntelligence, summarize } = require('./lib/intel');
+const sequences = require('./lib/sequences');
 const config = require('./config');
 
 // Licensed states only (MI resident; AZ/TN/FL active non-resident).
@@ -18,6 +19,13 @@ const config = require('./config');
 //   - Per-city targeting profiles: trucking hubs keep the trucking query; other
 //     metros query the niche commercial lines from nexusgpartners.net (contractors,
 //     restaurants, childcare, home health, auto repair, etc.).
+//
+// 2026-09-15 PATCH 2 — email-only commercial lane:
+//   Apollo Basic plan doesn't return phone numbers synchronously (phone reveal
+//   costs ~8 credits/number and needs a webhook flow). Until Dave enables that,
+//   Apollo leads go into the commercial_drip_v1 Brevo email sequence instead of
+//   the Vapi call queue. Leads WITH a phone (future reveal, leO SFTP) still call.
+//   Engagement (opens/clicks/replies) is tracked via /webhook/brevo.
 const SOURCES = [
   // ── Michigan (resident) ──
   { state: 'MI', city: 'Detroit',        keywords: 'trucking logistics freight transportation manufacturing', titles: ['Owner', 'President', 'CEO', 'Fleet Manager', 'Operations Manager'] },
@@ -91,18 +99,29 @@ async function ingestAndQueue() {
   console.log(`📥 Ingested ${allLeads.length} leads`);
 
   let queued = 0;
+  let dripped = 0;
 
   for (const leadData of allLeads) {
-    // Skip if already exists
+    // Skip if already exists (phone match when we have one; email match otherwise)
     const existing = await prisma.lead.findFirst({
-      where: { phone: leadData.phone, status: { not: 'closed' } }
+      where: {
+        OR: [
+          leadData.phone ? { phone: leadData.phone, status: { not: 'closed' } } : undefined,
+          leadData.email ? { email: leadData.email, status: { not: 'closed' } } : undefined
+        ].filter(Boolean)
+      }
     });
     if (existing) continue;
 
     // Validate state
     if (!config.ALLOWED_STATES.includes(leadData.state)) continue;
 
-    const lead = await prisma.lead.create({ data: leadData });
+    // Must have at least one contact path
+    if (!leadData.phone && !leadData.email) continue;
+
+    const lead = await prisma.lead.create({
+      data: { ...leadData, status: leadData.phone ? 'pending' : 'drip' }
+    });
 
     // FMCSA enrichment — best-effort, never blocks queueing
     try {
@@ -131,17 +150,30 @@ async function ingestAndQueue() {
       continue;
     }
 
-    // Calculate call time
-    const delay = isBusinessHours(lead.state)
-      ? 5000
-      : getNextBusinessTime(lead.state) - Date.now();
+    if (lead.phone) {
+      // Has a dialable number — call path (leO, future Apollo phone reveal)
+      const delay = isBusinessHours(lead.state)
+        ? 5000
+        : getNextBusinessTime(lead.state) - Date.now();
 
-    await callQueue.add('make-call', { leadId: lead.id }, {
-      delay: Math.max(delay, 0),
-      priority: intel.queue.bullPriority
-    });
-
-    queued++;
+      await callQueue.add('make-call', { leadId: lead.id }, {
+        delay: Math.max(delay, 0),
+        priority: intel.queue.bullPriority
+      });
+      queued++;
+    } else if (lead.email) {
+      // Email-only (Apollo without phone reveal) — commercial drip
+      try {
+        await sequences.enroll(lead, 'commercial_drip_v1', {
+          company: lead.company || 'your company',
+          industry: lead.industry || leadData.industry || 'trucking',
+          title: lead.title || 'business owner'
+        });
+        dripped++;
+      } catch (err) {
+        console.warn(`⚠️ Drip enroll failed for lead ${lead.id}: ${err.message}`);
+      }
+    }
   }
 
   // Update daily stats
@@ -150,11 +182,11 @@ async function ingestAndQueue() {
 
   await prisma.dailyStat.upsert({
     where: { date: today },
-    update: { leadsIngested: { increment: queued } },
-    create: { date: today, leadsIngested: queued }
+    update: { leadsIngested: { increment: queued + dripped } },
+    create: { date: today, leadsIngested: queued + dripped }
   });
 
-  console.log(`✅ Queued ${queued} leads for calling`);
+  console.log(`✅ Queued ${queued} leads for calling, enrolled ${dripped} in commercial drip`);
 }
 
 // Run every hour
