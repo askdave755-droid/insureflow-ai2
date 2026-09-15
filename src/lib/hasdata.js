@@ -9,10 +9,20 @@
  * Rows land in leads with vertical='life_fe', source='hasdata_maps',
  * status='pending'. Occupation niche comes from lib/occupations.js
  * (Maps categories -> Russell specialty line), falling back to the
- * scrape query. Dedupe order: place_id (unique) → phone.
+ * scrape query. Dedupe order: place_id (unique) -> phone.
+ *
+ * 2026-09-15 PATCH:
+ *   - State guard: skip any row whose parsed state is not a licensed state.
+ *     HasData city scrapes drift across borders (Detroit -> Windsor ON gave a
+ *     +1-519 number with null state -> 23502 NOT NULL violation). Dropping
+ *     unlicensed/foreign rows fixes the crash AND stops non-US lead leakage.
+ *   - Per-row try/catch: one bad row logs a warning and is counted as an error,
+ *     not allowed to abort the whole batch.
+ *   - Address parser now also matches 'City, ST' with no ZIP.
  */
 const axios = require('axios');
 const { detectOccupation } = require('./occupations');
+const config = require('../config');
 
 const HASDATA_API_KEY = process.env.HASDATA_API_KEY;
 // Correct API path per docs.hasdata.com: /scrape/google-maps/search
@@ -45,11 +55,19 @@ const CITY_COORDS = {
   'fort lauderdale, fl': '@26.1224,-80.1373,12z'
 };
 
-// Parse 'City, ST' out of a Maps address string.
+// Parse 'City, ST' out of a Maps address string. Handles:
+//   "123 Main St, Detroit, MI 48201"  (street, city, ST zip)
+//   "Detroit, MI 48201" / "Detroit, MI"  (city, ST [zip])
+//   "123 Main St, MI 48201"           (street, ST zip, no city)
 function parseCityState(address) {
-  const m = String(address || '').match(/,\s*([^,]+),\s*([A-Z]{2})\s+\d{5}/i);
-  if (!m) return { city: null, state: null };
-  return { city: m[1].trim(), state: m[2].toUpperCase() };
+  const a = String(address || '');
+  let m = a.match(/,\s*([^,]+),\s*([A-Z]{2})\s+\d{5}/i);      // street, city, ST zip
+  if (m) return { city: m[1].trim(), state: m[2].toUpperCase() };
+  m = a.match(/^\s*([^,]+),\s*([A-Z]{2})(?:\s+\d{5})?\s*$/i); // city, ST [zip]
+  if (m) return { city: m[1].trim(), state: m[2].toUpperCase() };
+  m = a.match(/,\s*([A-Z]{2})\s+\d{5}/);                       // street, ST zip (no city)
+  if (m) return { city: null, state: m[1].toUpperCase() };
+  return { city: null, state: null };
 }
 
 function normalizePhone(raw) {
@@ -77,52 +95,66 @@ async function hasdataMapsSearch(query, ll, start = 0) {
   return data?.localResults || data?.results || data?.data || (Array.isArray(data) ? data : []);
 }
 
-// Insert rows into leads (life_fe vertical). Best-effort per row.
-// Niche: detectOccupation(categories, description) from lib/occupations.js;
-// if it lands on the generic fallback, use the scrape query instead.
+// Insert rows into leads (life_fe vertical). Best-effort per row — a bad row is
+// logged + counted, never aborts the batch.
 // Dedupe on place_id first (Google identity), then phone.
 async function importHasDataRows(rows, pool, query = null) {
-  let imported = 0, skipped = 0;
+  let imported = 0, skipped = 0, errors = 0;
   for (const row of rows) {
-    const placeId = row.placeId || row.place_id || null;
-    const phone = normalizePhone(row.phone || row.phoneNumber);
-    if (!phone) { skipped++; continue; }
+    try {
+      const placeId = row.placeId || row.place_id || null;
+      const phone = normalizePhone(row.phone || row.phoneNumber);
+      if (!phone) { skipped++; continue; }
 
-    const name = row.title || row.name || 'Business Owner';
-    const { city, state } = parseCityState(row.address || row.fullAddress);
-    const categories = Array.isArray(row.types) ? row.types.join(',')
-                     : Array.isArray(row.categories) ? row.categories.join(',')
-                     : (row.type || row.category || null);
+      const name = row.title || row.name || 'Business Owner';
+      const { city, state } = parseCityState(row.address || row.fullAddress);
 
-    // Maps category -> Russell specialty niche (occupation / occupation_plural)
-    const occ = detectOccupation(categories, row.description || row.title || '');
-    const occupation = occ.singular !== 'business owner' ? occ.singular
-                     : (query ? singularize(query) : occ.singular);
-    const occupationPlural = occ.singular !== 'business owner' ? occ.plural
-                     : (query || occ.plural);
+      // Licensed-state guard: drops border-drift (Windsor ON etc.) and any row
+      // whose state could not be parsed. Prevents the 23502 NOT NULL crash and
+      // keeps non-licensed / non-US leads out of the pipeline.
+      if (!state || !config.ALLOWED_STATES.includes(state)) {
+        skipped++;
+        console.warn(`HasData skip (state "${state || 'unparsed'}" not licensed): ${name} ${phone}`);
+        continue;
+      }
 
-    // Dedupe: place_id first
-    if (placeId) {
-      const dup = await pool.query(`SELECT id FROM leads WHERE place_id=$1 LIMIT 1`, [placeId]);
+      const categories = Array.isArray(row.types) ? row.types.join(',')
+                       : Array.isArray(row.categories) ? row.categories.join(',')
+                       : (row.type || row.category || null);
+
+      // Maps category -> Russell specialty niche (occupation / occupation_plural)
+      const occ = detectOccupation(categories, row.description || row.title || '');
+      const occupation = occ.singular !== 'business owner' ? occ.singular
+                       : (query ? singularize(query) : occ.singular);
+      const occupationPlural = occ.singular !== 'business owner' ? occ.plural
+                       : (query || occ.plural);
+
+      // Dedupe: place_id first
+      if (placeId) {
+        const dup = await pool.query(`SELECT id FROM leads WHERE place_id=$1 LIMIT 1`, [placeId]);
+        if (dup.rows.length) { skipped++; continue; }
+      }
+      const dup = await pool.query(
+        `SELECT id FROM leads WHERE phone=$1 AND status NOT IN ('closed','compliance_hold') LIMIT 1`,
+        [phone]
+      );
       if (dup.rows.length) { skipped++; continue; }
-    }
-    const dup = await pool.query(
-      `SELECT id FROM leads WHERE phone=$1 AND status NOT IN ('closed','compliance_hold') LIMIT 1`,
-      [phone]
-    );
-    if (dup.rows.length) { skipped++; continue; }
 
-    await pool.query(
-      `INSERT INTO leads (id, name, phone, company, state, city, industry, occupation,
-                          occupation_plural, categories, place_id,
-                          insurance_type, source, status, vertical, created_at, updated_at)
-       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-               'life', 'hasdata_maps', 'pending', 'life_fe', NOW(), NOW())`,
-      [name, phone, name, state, city, occupation, occupation, occupationPlural, categories, placeId]
-    );
-    imported++;
+      await pool.query(
+        `INSERT INTO leads (id, name, phone, company, state, city, industry, occupation,
+                            occupation_plural, categories, place_id,
+                            insurance_type, source, status, vertical, created_at, updated_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                 'life', 'hasdata_maps', 'pending', 'life_fe', NOW(), NOW())`,
+        [name, phone, name, state, city, occupation, occupation, occupationPlural, categories, placeId]
+      );
+      imported++;
+    } catch (e) {
+      errors++;
+      console.warn(`HasData row insert failed (${row.title || row.name || 'unknown'}): ${e.message}`);
+    }
   }
-  return { imported, skipped };
+  return { imported, skipped, errors };
 }
 
 module.exports = { CITY_COORDS, hasdataMapsSearch, importHasDataRows };
