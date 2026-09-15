@@ -5,7 +5,6 @@ const { fetchApolloContacts, fetchLeOFromSFTP } = require('./sources');
 const { enrichWithFMCSA } = require('./sources/fmcsa');
 const { isBusinessHours, getNextBusinessTime } = require('./lib/validate');
 const { runIntelligence, summarize } = require('./lib/intel');
-const sequences = require('./lib/sequences');
 const config = require('./config');
 
 // Licensed states only (MI resident; AZ/TN/FL active non-resident).
@@ -20,12 +19,10 @@ const config = require('./config');
 //     metros query the niche commercial lines from nexusgpartners.net (contractors,
 //     restaurants, childcare, home health, auto repair, etc.).
 //
-// 2026-09-15 PATCH 2 — email-only commercial lane:
-//   Apollo Basic plan doesn't return phone numbers synchronously (phone reveal
-//   costs ~8 credits/number and needs a webhook flow). Until Dave enables that,
-//   Apollo leads go into the commercial_drip_v1 Brevo email sequence instead of
-//   the Vapi call queue. Leads WITH a phone (future reveal, leO SFTP) still call.
-//   Engagement (opens/clicks/replies) is tracked via /webhook/brevo.
+// 2026-09-15 PATCH 2 — email-only lane (reverted to stable version):
+//   The email-only drip enroll is commented out pending a boot-crash fix.
+//   Apollo leads with phones still queue for calls. Email-only leads are
+//   stored in the DB but not yet enrolled in the drip — next patch.
 const SOURCES = [
   // ── Michigan (resident) ──
   { state: 'MI', city: 'Detroit',        keywords: 'trucking logistics freight transportation manufacturing', titles: ['Owner', 'President', 'CEO', 'Fleet Manager', 'Operations Manager'] },
@@ -99,84 +96,77 @@ async function ingestAndQueue() {
   console.log(`📥 Ingested ${allLeads.length} leads`);
 
   let queued = 0;
-  let dripped = 0;
 
   for (const leadData of allLeads) {
-    // Skip if already exists (phone match when we have one; email match otherwise)
-    const existing = await prisma.lead.findFirst({
-      where: {
-        OR: [
-          leadData.phone ? { phone: leadData.phone, status: { not: 'closed' } } : undefined,
-          leadData.email ? { email: leadData.email, status: { not: 'closed' } } : undefined
-        ].filter(Boolean)
-      }
-    });
-    if (existing) continue;
-
-    // Validate state
-    if (!config.ALLOWED_STATES.includes(leadData.state)) continue;
-
-    // Must have at least one contact path
-    if (!leadData.phone && !leadData.email) continue;
-
-    const lead = await prisma.lead.create({
-      data: {
-        ...leadData,
-        phone: leadData.phone || '',  // schema patched to nullable; '' for backwards compat
-        status: leadData.phone ? 'pending' : 'drip'
-      }
-    });
-
-    // FMCSA enrichment — best-effort, never blocks queueing
     try {
-      const fmcsa = await enrichWithFMCSA({
-        name: lead.name,
-        company: lead.company,
-        state: lead.state,
-        phone: lead.phone
-      });
-      if (fmcsa) {
-        await prisma.lead.update({ where: { id: lead.id }, data: fmcsa });
-        Object.assign(lead, fmcsa);
-        console.log(`🛡️ FMCSA enriched: ${lead.company || lead.name} DOT#${fmcsa.dotNumber} ${fmcsa.authorityStatus || ''}`.trim());
+      // Dedupe: skip if phone or email already exists
+      const orConditions = [];
+      if (leadData.phone) orConditions.push({ phone: leadData.phone, status: { not: 'closed' } });
+      if (leadData.email) orConditions.push({ email: leadData.email, status: { not: 'closed' } });
+      if (orConditions.length) {
+        const existing = await prisma.lead.findFirst({ where: { OR: orConditions } });
+        if (existing) continue;
       }
-    } catch (err) {
-      console.warn(`⚠️ FMCSA enrichment failed for lead ${lead.id}: ${err.message}`);
-    }
 
-    // Phase 2 — score, tier, prioritize
-    const intel = runIntelligence(lead);
-    await prisma.lead.update({ where: { id: lead.id }, data: intel.updates });
-    console.log(summarize(lead, intel));
+      // Validate state
+      if (!config.ALLOWED_STATES.includes(leadData.state)) continue;
 
-    if (intel.queue.skip) {
-      await prisma.lead.update({ where: { id: lead.id }, data: { status: 'nurture' } });
-      continue;
-    }
+      // Must have at least one contact path
+      if (!leadData.phone && !leadData.email) continue;
 
-    if (lead.phone) {
-      // Has a dialable number — call path (leO, future Apollo phone reveal)
-      const delay = isBusinessHours(lead.state)
-        ? 5000
-        : getNextBusinessTime(lead.state) - Date.now();
-
-      await callQueue.add('make-call', { leadId: lead.id }, {
-        delay: Math.max(delay, 0),
-        priority: intel.queue.bullPriority
+      const lead = await prisma.lead.create({
+        data: {
+          ...leadData,
+          phone: leadData.phone || '',
+          status: leadData.phone ? 'pending' : 'drip'
+        }
       });
-      queued++;
-    } else if (lead.email) {
-      // Email-only (Apollo without phone reveal) — commercial drip
+
+      // FMCSA enrichment — best-effort, never blocks queueing
       try {
-        await sequences.enroll(lead, 'commercial_drip_v1', {
-          company: lead.company || 'your company',
-          industry: lead.industry || leadData.industry || 'trucking',
-          title: lead.title || 'business owner'
+        const fmcsa = await enrichWithFMCSA({
+          name: lead.name,
+          company: lead.company,
+          state: lead.state,
+          phone: lead.phone
         });
-        dripped++;
+        if (fmcsa) {
+          await prisma.lead.update({ where: { id: lead.id }, data: fmcsa });
+          Object.assign(lead, fmcsa);
+          console.log(`🛡️ FMCSA enriched: ${lead.company || lead.name} DOT#${fmcsa.dotNumber} ${fmcsa.authorityStatus || ''}`.trim());
+        }
       } catch (err) {
-        console.warn(`⚠️ Drip enroll failed for lead ${lead.id}: ${err.message}`);
+        console.warn(`⚠️ FMCSA enrichment failed for lead ${lead.id}: ${err.message}`);
       }
+
+      // Phase 2 — score, tier, prioritize
+      const intel = runIntelligence(lead);
+      await prisma.lead.update({ where: { id: lead.id }, data: intel.updates });
+      console.log(summarize(lead, intel));
+
+      if (intel.queue.skip) {
+        await prisma.lead.update({ where: { id: lead.id }, data: { status: 'nurture' } });
+        continue;
+      }
+
+      if (lead.phone) {
+        // Has a dialable number — call path
+        const delay = isBusinessHours(lead.state)
+          ? 5000
+          : getNextBusinessTime(lead.state) - Date.now();
+
+        await callQueue.add('make-call', { leadId: lead.id }, {
+          delay: Math.max(delay, 0),
+          priority: intel.queue.bullPriority
+        });
+        queued++;
+      } else if (lead.email) {
+        // Email-only — store for drip (enrollment coming in next patch)
+        console.log(`📧 Email-only lead stored: ${lead.name} <${lead.email}> (${lead.company || 'no company'})`);
+        queued++;
+      }
+    } catch (leadErr) {
+      console.error(`❌ Failed to process lead ${leadData.name || 'unknown'}:`, leadErr.message);
     }
   }
 
@@ -186,11 +176,11 @@ async function ingestAndQueue() {
 
   await prisma.dailyStat.upsert({
     where: { date: today },
-    update: { leadsIngested: { increment: queued + dripped } },
-    create: { date: today, leadsIngested: queued + dripped }
+    update: { leadsIngested: { increment: queued } },
+    create: { date: today, leadsIngested: queued }
   });
 
-  console.log(`✅ Queued ${queued} leads for calling, enrolled ${dripped} in commercial drip`);
+  console.log(`✅ Queued/stored ${queued} leads`);
 }
 
 // Run every hour
