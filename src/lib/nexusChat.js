@@ -9,11 +9,11 @@
 //   everything else (term_life, disability, unknown) -> life_fe pending,
 //                   queued the same way — these are inbound WARM leads,
 //                   they jump the line ahead of scraped leads (priority 1)
-const prisma = require('./db');
-const { callQueue } = require('./queue');
-const { formatPhoneE164, isBusinessHours, getNextBusinessTime } = require('./lib/validate');
-const { createTask } = require('./lib/followup');
-const { brevoEmail } = require('./lib/brevo');
+const prisma = require('../db');
+const { callQueue } = require('../queue');
+const { formatPhoneE164, isBusinessHours, getNextBusinessTime } = require('./validate');
+const { createTask } = require('./followup');
+const { brevoEmail } = require('./brevo');
 
 const PRODUCT_LABELS = {
   term_life: 'Term life',
