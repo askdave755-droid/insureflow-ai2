@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<!-- ============================================================
+  NEXUS CHAT QUOTE MACHINE  v2.1 (InsureFlow-integrated)  (single-file embeddable widget)
+  Duplicates the VAPI voice qualification flow in chat form.
+
+  Hosted at: https://insureflow-ai2-production.up.railway.app/nexus-chat.html
+  Embed on nexusgpartners.net with:
+    <iframe src="https://insureflow-ai2-production.up.railway.app/nexus-chat.html"
+            style="position:fixed;bottom:0;right:0;width:120px;height:120px;border:none;z-index:9998;pointer-events:auto"
+            id="nxq-frame" title="Chat quote"></iframe>
+  (or paste the whole file inline before </body> — it is self-contained)
+
+  Leads POST to /webhook/nexus-chat on InsureFlow -> land in the pipeline,
+  Brady call queued at priority 1, Dave alerted by email.
+  "Talk to an agent" number is fetched live from /api/nexus-chat-config
+  (Railway env AGENT_PHONE_DISPLAY) — change it there, not here.
+  ============================================================ -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{--nx-accent:#2f7de1;--nx-bg:#0d1117;--nx-card:#161b22;--nx-text:#e6edf3;--nx-dim:#8b949e;--nx-ok:#3fb950}
+#nxq-root{position:fixed;bottom:18px;right:18px;z-index:9999;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+#nxq-launch{width:60px;height:60px;border-radius:50%;border:none;background:var(--nx-accent);color:#fff;font-size:26px;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.45)}
+#nxq-panel{display:none;flex-direction:column;width:min(380px,calc(100vw - 36px));height:min(600px,calc(100dvh - 120px));background:var(--nx-bg);color:var(--nx-text);border:1px solid #30363d;border-radius:14px;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.55)}
+#nxq-panel.open{display:flex}
+#nxq-head{display:flex;justify-content:space-between;align-items:center;padding:12px 14px;background:var(--nx-card);border-bottom:1px solid #30363d}
+#nxq-head b{font-size:14px}#nxq-head small{display:block;color:var(--nx-dim);font-size:11px}
+#nxq-close{background:none;border:none;color:var(--nx-dim);font-size:20px;cursor:pointer}
+#nxq-msgs{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
+.nxq-msg{max-width:85%;padding:10px 12px;border-radius:12px;font-size:14px;line-height:1.45;white-space:pre-wrap}
+.nxq-bot{background:var(--nx-card);border:1px solid #30363d;align-self:flex-start;border-bottom-left-radius:4px}
+.nxq-user{background:var(--nx-accent);color:#fff;align-self:flex-end;border-bottom-right-radius:4px}
+.nxq-opts{display:flex;flex-wrap:wrap;gap:8px;align-self:flex-start;max-width:95%}
+.nxq-opt{padding:9px 13px;border-radius:20px;border:1px solid var(--nx-accent);background:transparent;color:var(--nx-text);font-size:13px;cursor:pointer}
+.nxq-opt:hover{background:var(--nx-accent);color:#fff}
+#nxq-input{display:flex;gap:8px;padding:10px;border-top:1px solid #30363d}
+#nxq-field{flex:1;padding:10px 12px;border-radius:20px;border:1px solid #30363d;background:var(--nx-card);color:var(--nx-text);font-size:14px}
+#nxq-send{width:44px;height:40px;border-radius:50%;border:none;background:var(--nx-accent);color:#fff;font-size:16px;cursor:pointer}
+.nxq-cta{display:flex;flex-direction:column;gap:8px;align-self:stretch}
+.nxq-cta a{display:block;text-align:center;padding:12px;border-radius:10px;font-size:14px;font-weight:600;text-decoration:none}
+.nxq-call{background:var(--nx-ok);color:#08110a}
+.nxq-link{background:var(--nx-accent);color:#fff}
+.nxq-fine{font-size:10.5px;color:var(--nx-dim);align-self:center;text-align:center;max-width:95%}
+.nxq-typing{color:var(--nx-dim);font-size:12px;align-self:flex-start}
+</style>
+<base target="_blank">
+</head>
+<body>
+<div id="nxq-root">
+  <div id="nxq-panel">
+    <div id="nxq-head">
+      <div><b>Nexus Quote Assistant</b><small>Typically replies instantly · Licensed Michigan agent</small></div>
+      <button id="nxq-close" aria-label="close">×</button>
+    </div>
+    <div id="nxq-msgs"></div>
+    <div id="nxq-input">
+      <input id="nxq-field" placeholder="Type here…" autocomplete="off">
+      <button id="nxq-send">➤</button>
+    </div>
+  </div>
+  <button id="nxq-launch" aria-label="chat">💬</button>
+</div>
+<script>
+/* ===================== CONFIG — server-wired ===================== */
+const NXQ_ORIGIN = "https://insureflow-ai2-production.up.railway.app";
+const NXQ_CONFIG = {
+  AGENT_PHONE: "",                          // fetched live from /api/nexus-chat-config
+  ONLINE_LINK: "https://insuremenowdirect.com/agent/dawudrafael/",
+  WEBHOOK: NXQ_ORIGIN + "/webhook/nexus-chat",
+  BRAND: "Nexus Growth Partners",
+  BRAIN_URL: "",                            // future: AI answers to off-script questions
+};
+/* ================================================================= */
+
+const $ = s => document.querySelector(s);
+const msgs = $("#nxq-msgs"), field = $("#nxq-field");
+const state = { data: { source: "nexus_chat", lane: "WEB" } };
+
+/* pull the live agent number; fall back to hiding the call CTA */
+(async function loadCfg(){
+  try{
+    const r = await fetch(NXQ_ORIGIN + "/api/nexus-chat-config");
+    const d = await r.json();
+    if(d.agentPhone) NXQ_CONFIG.AGENT_PHONE = d.agentPhone;
+  }catch(e){ /* offline config — widget still works, call CTA hidden */ }
+})();
+
+/* ---------- tiny DOM helpers ---------- */
+function scroll(){ msgs.scrollTop = msgs.scrollHeight; }
+function bot(text, delay=500){
+  return new Promise(res=>{ const t=document.createElement("div");
+    t.className="nxq-msg nxq-bot"; t.textContent="…"; msgs.appendChild(t); scroll();
+    setTimeout(()=>{ t.textContent=text; scroll(); res(t); }, delay); });
+}
+function user(text){ const d=document.createElement("div");
+  d.className="nxq-msg nxq-user"; d.textContent=text; msgs.appendChild(d); scroll(); }
+function options(list){
+  return new Promise(res=>{ const w=document.createElement("div"); w.className="nxq-opts";
+    list.forEach(o=>{ const b=document.createElement("button"); b.className="nxq-opt";
+      b.textContent=o.label; b.onclick=()=>{ w.remove(); user(o.label);
+        state.data[o.key]=o.value; res(o.value); };
+      w.appendChild(b); });
+    msgs.appendChild(w); scroll(); });
+}
+let nxqSession = null;
+let nxqCurrentQ = "";                    // what we last asked (used to re-ask)
+
+/* If the user typed something off-script (validation failed), route it to
+   the chat brain, show the educational answer, then resume the funnel. */
+async function askBrain(message){
+  if(!NXQ_CONFIG.BRAIN_URL){
+    return "Good question — a licensed agent can give you the exact answer. "
+         + "Meanwhile, want to finish the quick estimate?";
+  }
+  try{
+    const r = await fetch(NXQ_CONFIG.BRAIN_URL, {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({message, session_id: nxqSession})});
+    const d = await r.json();
+    nxqSession = d.session_id || nxqSession;
+    return d.answer;
+  }catch(e){
+    return "Good question — a licensed agent can give you the exact answer. "
+         + "Meanwhile, want to finish the quick estimate?";
+  }
+}
+
+function input(validate, promptLabel){
+  if(promptLabel) nxqCurrentQ = promptLabel;
+  return new Promise(async res=>{
+    const go=async()=>{ const v=field.value.trim();
+      if(!v) return;
+      if(validate && !validate(v)){
+        field.value=""; user(v);
+        // ---- off-script: brain answers, funnel resumes ----
+        const ans = await askBrain(v);
+        await bot(ans, 300);
+        await bot("Back to the estimate — " + nxqCurrentQ, 400);
+        res(await input(validate));          // re-ask same step
+        return;
+      }
+      field.value=""; user(v); res(v); };
+    $("#nxq-send").onclick=go;
+    field.onkeydown=e=>{ if(e.key==="Enter") go(); };
+    field.focus();
+  });
+}
+const isZip = v=>/^\d{5}$/.test(v);
+const isPhone = v=>/^[\d\s()+.-]{10,}$/.test(v);
+const isEmail = v=>/^\S+@\S+\.\S+$/.test(v);
+const isAge  = v=>{ const n=+v; return n>=18 && n<=85; };
+
+/* ---------- rough educational estimate (NOT a binding quote) ---------- */
+function estimate(d){
+  const base = d.tobacco==="yes" ? 1.9 : 1.0;
+  const ageFactor = Math.max(0.6, (d.age-20)*0.09 + 0.55);
+  const per1000 = 0.11 * base * ageFactor;            // $ per $1k of coverage / month
+  const monthly = per1000 * (d.coverage/1000);
+  const lo = Math.max(8, Math.round(monthly*0.85)), hi = Math.round(monthly*1.25);
+  return `$${lo} – $${hi}/mo`;
+}
+
+/* ---------- lead handoff ---------- */
+function saveLead(){
+  state.data.captured_at = new Date().toISOString();
+  try{ localStorage.setItem("nxq_lead_"+Date.now(), JSON.stringify(state.data)); }catch(e){}
+  if(NXQ_CONFIG.WEBHOOK){
+    fetch(NXQ_CONFIG.WEBHOOK,{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(state.data)}).catch(()=>{});
+  }
+}
+function linkWithParams(){
+  const d = state.data, u = new URL(NXQ_CONFIG.ONLINE_LINK);
+  ["name","phone","email","zip","coverage","term","product"].forEach(k=>{
+    if(d[k]) u.searchParams.set(k, d[k]); });
+  u.searchParams.set("utm_source","nexus_chat"); u.searchParams.set("utm_medium","widget");
+  return u.toString();
+}
+function handoff(productLabel, estimateStr){
+  saveLead();
+  const w=document.createElement("div"); w.className="nxq-msg nxq-bot"; w.style.alignSelf="stretch";
+  w.innerHTML = `<b>You're all set, ${state.data.name.split(" ")[0]}.</b>
+${productLabel}${estimateStr?` — ballpark <b>${estimateStr}</b>`:""}.
+Pick whichever is easier:`;
+  const c=document.createElement("div"); c.className="nxq-cta";
+  let cta = "";
+  if(NXQ_CONFIG.AGENT_PHONE){
+    cta += `<a class="nxq-call" href="tel:${NXQ_CONFIG.AGENT_PHONE}">📞 Talk to an agent now</a>`;
+  }
+  cta += `<a class="nxq-link" href="${linkWithParams()}" target="_blank" rel="noopener">Continue online → instant quote</a>`;
+  c.innerHTML = cta;
+  const f=document.createElement("div"); f.className="nxq-fine";
+  f.textContent="Estimate is educational only, not a binding quote. Rates depend on carrier underwriting. "+NXQ_CONFIG.BRAND+" · Licensed in Michigan";
+  msgs.append(w,c,f); scroll();
+}
+
+/* ---------- flows ---------- */
+async function contactThen(productLabel){
+  await bot("What's your first name?"); state.data.name = await input(null, "what's your first name?");
+  await bot("Best phone number?");      state.data.phone = await input(isPhone, "best phone number?");
+  await bot("And your email?");         state.data.email = await input(isEmail, "and your email?");
+  await bot("Got it — one of our licensed agents will follow up shortly.", 400);
+  handoff(productLabel, null);
+}
+async function termFlow(){
+  await bot("Great choice — term life is usually the cheapest way to protect a young family. A few quick questions:");
+  await bot("How old are you?"); state.data.age = +(await input(isAge, "how old are you?"));
+  await bot("Do you use tobacco or nicotine? (vapes count)");
+  state.data.tobacco = await options([{label:"No",value:"no",key:"tobacco"},{label:"Yes",value:"yes",key:"tobacco"}]);
+  await bot("How much coverage should your family have if you're gone?");
+  state.data.coverage = await options([
+    {label:"$100K",value:100000,key:"coverage"},{label:"$250K",value:250000,key:"coverage"},
+    {label:"$500K",value:500000,key:"coverage"},{label:"$1M",value:1000000,key:"coverage"}]);
+  await bot("For how long?");
+  state.data.term = await options([
+    {label:"10 years",value:"10",key:"term"},{label:"20 years",value:"20",key:"term"},
+    {label:"30 years",value:"30",key:"term"}]);
+  await bot("Your ZIP code?"); state.data.zip = await input(isZip, "your ZIP code?");
+  await bot("First name?");    state.data.name = await input(null, "first name?");
+  await bot("Phone?");         state.data.phone = await input(isPhone, "phone number?");
+  await bot("Email?");         state.data.email = await input(isEmail, "email?");
+  await bot("Crunching numbers…", 900);
+  handoff(`Term life ${"$"+(+state.data.coverage).toLocaleString()} / ${state.data.term}yr`, estimate(state.data));
+}
+
+/* ---------- entry ---------- */
+(async function main(){
+  $("#nxq-launch").onclick=()=>$("#nxq-panel").classList.toggle("open");
+  $("#nxq-close").onclick=()=>$("#nxq-panel").classList.remove("open");
+  let started=false;
+  $("#nxq-launch").addEventListener("click", async ()=>{
+    if(started) return; started=true;
+    await bot(`Hey, I'm the ${NXQ_CONFIG.BRAND} quote assistant. I can ballpark your rate in about 60 seconds — no phone call required unless you want one. What are you looking to protect?`, 700);
+    state.data.product = await options([
+      {label:"🏠 My family's income (term life)", value:"term_life", key:"product"},
+      {label:"💵 My paycheck (disability)",       value:"disability", key:"product"},
+      {label:"🚛 My business / trucking",         value:"commercial", key:"product"},
+      {label:"🤔 Not sure yet",                  value:"unknown",   key:"product"}]);
+    if(state.data.product==="term_life") termFlow();
+    else contactThen({disability:"Disability income",commercial:"Commercial / trucking",unknown:"Coverage review"}[state.data.product]);
+  });
+})();
+</script>
+</body>
+</html>
