@@ -21,15 +21,12 @@ const { requireAdminKey, verifyVapiWebhook, verifyPhantomWebhook, actorFromReque
 const { auditMiddleware, audit } = require('./lib/audit');
 const { checkContactPermission, addToDnc, recordConsent } = require('./lib/compliance');
 const { handleBrevoEvent, handleApolloPhoneWebhook, recentEngagement } = require('./lib/engagement');
+const { handleNexusChatLead } = require('./lib/nexusChat');
 
 const router = express.Router();
 router.use(auditMiddleware());
 
 // Gate every outreach queueing decision through the compliance engine.
-// queueOpts (from runIntelligence): { skip, bullPriority, reason } — a skip
-// sends the lead to nurture without ever hitting the compliance engine.
-// Returns { queued, delay, lead } — handles hold (schedule at retryAt) and
-// blocked (compliance_hold, no queue) states.
 async function complianceGateAndQueue(lead, actor, queueOpts = {}) {
   if (queueOpts.skip) {
     await prisma.lead.update({ where: { id: lead.id }, data: { status: 'nurture' } });
@@ -127,14 +124,14 @@ router.post('/api/leads', requireAdminKey, async (req, res) => {
     vehicleCount: z.number().optional(),
     xDate: z.string().datetime().optional()
   });
-  
+
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error });
-  
+
   const data = parsed.data;
   const phone = formatPhoneE164(data.phone);
   if (!phone) return res.status(400).json({ error: 'Invalid phone number' });
-  
+
   const lead = await prisma.lead.create({
     data: {
       ...data,
@@ -143,10 +140,9 @@ router.post('/api/leads', requireAdminKey, async (req, res) => {
     }
   });
 
-  // Phase 2 — score, tier, prioritize before compliance gate
   const intel = runIntelligence(lead);
   await prisma.lead.update({ where: { id: lead.id }, data: intel.updates });
-  
+
   const gate = await complianceGateAndQueue(lead, actorFromRequest(req, 'api'), intel.queue);
   await req.audit({ actor: actorFromRequest(req, 'api'), action: 'create', entityType: 'Lead', entityId: lead.id, after: { name: lead.name, phone: lead.phone, state: lead.state, source: lead.source }, metadata: { gate, scores: intel.scores } });
 
@@ -169,9 +165,9 @@ router.get('/test-call/:phone', requireAdminKey, async (req, res) => {
   try {
     const phone = formatPhoneE164(req.params.phone);
     if (!phone) return res.status(400).json({ error: 'Invalid phone number' });
-    
+
     const force = req.query.force === 'true';
-    
+
     const lead = await prisma.lead.create({
       data: {
         name: 'Dave Test',
@@ -183,9 +179,9 @@ router.get('/test-call/:phone', requireAdminKey, async (req, res) => {
         status: 'pending'
       }
     });
-    
+
     await callQueue.add('make-call', force ? { leadId: lead.id, force: true } : { leadId: lead.id }, { delay: 3000 });
-    
+
     res.json({
       message: `Test call queued for ${phone} (3s delay)${force ? ' [FORCE MODE]' : ''}`,
       leadId: lead.id,
@@ -200,23 +196,22 @@ router.get('/test-call/:phone', requireAdminKey, async (req, res) => {
 // ─── GET LEADS ───
 router.get('/api/leads', requireAdminKey, async (req, res) => {
   const { status, state, limit = 50 } = req.query;
-  
+
   const where = {};
   if (status) where.status = status;
   if (state) where.state = state.toUpperCase();
-  
+
   const leads = await prisma.lead.findMany({
     where,
     orderBy: { createdAt: 'desc' },
     take: parseInt(limit),
     include: { callLogs: { orderBy: { createdAt: 'desc' }, take: 1 } }
   });
-  
+
   res.json(leads);
 });
 
 // ─── PIPELINE VIEW (Phase 2 — prioritized prospect list) ───
-// GET /api/pipeline?band=HOT&tier=STRIKE_ZONE&state=MI&minScore=60&limit=50
 router.get('/api/pipeline', requireAdminKey, async (req, res) => {
   const { band, minScore, tier, state, limit = 50 } = req.query;
   const where = { status: { notIn: ['closed', 'compliance_hold'] } };
@@ -244,7 +239,6 @@ router.get('/api/pipeline', requireAdminKey, async (req, res) => {
 // ═══════════════════════════════════════════════════════
 
 // ─── TASKS (Dave's to-do list) ───
-// GET /api/tasks?status=open&priority=hot&dueBefore=2026-09-01&limit=50
 router.get('/api/tasks', requireAdminKey, async (req, res) => {
   const { status = 'open', priority, dueBefore, limit = 50 } = req.query;
   const where = {};
@@ -286,7 +280,6 @@ router.post('/api/leads/:id/promote', requireAdminKey, async (req, res) => {
 });
 
 // ─── OPPORTUNITIES ───
-// GET /api/opportunities?stage=QUALIFIED&priority=hot&limit=50
 router.get('/api/opportunities', requireAdminKey, async (req, res) => {
   const { stage, priority, limit = 50 } = req.query;
   const where = {};
@@ -304,7 +297,6 @@ router.get('/api/opportunities', requireAdminKey, async (req, res) => {
   res.json(opportunities);
 });
 
-// Move an opportunity through the pipeline — illegal jumps are rejected
 router.post('/api/opportunities/:id/stage', requireAdminKey, async (req, res) => {
   const { stage, lostReason } = req.body || {};
   if (!stage) return res.status(400).json({ error: 'stage required' });
@@ -342,7 +334,6 @@ router.post('/api/opportunities/:id/stage', requireAdminKey, async (req, res) =>
 // ═══════════════════════════════════════════════════════
 
 // ─── CARRIER APPETITE PREVIEW ───
-// GET /api/carriers/match?state=MI&vehicles=5&hazmat=false
 router.get('/api/carriers/match', requireAdminKey, (req, res) => {
   const { state, vehicles = 1, hazmat = 'false', revenue = 0 } = req.query;
   if (!state) return res.status(400).json({ error: 'state required' });
@@ -357,7 +348,6 @@ router.get('/api/carriers/match', requireAdminKey, (req, res) => {
 });
 
 // ─── BUILD SUBMISSIONS (carrier-matched, ACORD-style package) ───
-// POST /api/opportunities/:id/submissions  { carriers?: [names], count?: 3 }
 router.post('/api/opportunities/:id/submissions', requireAdminKey, async (req, res) => {
   try {
     const result = await createSubmissions(req.params.id, req.body || {}, actorFromRequest(req, 'admin'));
@@ -377,7 +367,6 @@ router.get('/api/opportunities/:id/submissions', requireAdminKey, async (req, re
   res.json(submissions);
 });
 
-// Mark a submission sent to the carrier
 router.post('/api/submissions/:id/submit', requireAdminKey, async (req, res) => {
   try {
     const submission = await submitSubmission(req.params.id, actorFromRequest(req, 'admin'));
@@ -388,7 +377,6 @@ router.post('/api/submissions/:id/submit', requireAdminKey, async (req, res) => 
   }
 });
 
-// Decline / withdraw a submission (carrier said no, or we pulled it)
 router.post('/api/submissions/:id/decline', requireAdminKey, async (req, res) => {
   const { reason } = req.body || {};
   const before = await prisma.submission.findUnique({ where: { id: req.params.id } });
@@ -407,8 +395,6 @@ router.post('/api/submissions/:id/decline', requireAdminKey, async (req, res) =>
 });
 
 // ─── QUOTES ───
-// Record a carrier's quote response
-// POST /api/submissions/:id/quotes { premium, commissionRate, coverages, effectiveDate, expirationDate, notes }
 router.post('/api/submissions/:id/quotes', requireAdminKey, async (req, res) => {
   try {
     const quote = await recordQuote(req.params.id, req.body || {}, actorFromRequest(req, 'admin'));
@@ -428,7 +414,6 @@ router.post('/api/quotes/:id/present', requireAdminKey, async (req, res) => {
   }
 });
 
-// Insured accepted — binds the policy, seeds the renewal, tasks Dave
 router.post('/api/quotes/:id/accept', requireAdminKey, async (req, res) => {
   try {
     const result = await acceptQuote(req.params.id, actorFromRequest(req, 'admin'));
@@ -485,7 +470,6 @@ router.get('/api/renewals', requireAdminKey, async (req, res) => {
 // PHASE 5 — AGENCY OS
 // ═══════════════════════════════════════════════════════
 
-// Dashboard data (JSON) — everything the Agency OS page needs in one call
 router.get('/api/dashboard', requireAdminKey, async (req, res) => {
   try {
     const data = await getDashboard();
@@ -496,8 +480,6 @@ router.get('/api/dashboard', requireAdminKey, async (req, res) => {
   }
 });
 
-// The Agency OS page itself — open /dashboard in any browser (phone-friendly),
-// enter the admin key once, done.
 router.get('/dashboard', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'dashboard.html'));
 });
@@ -514,22 +496,17 @@ router.post('/webhook/vapi/done', verifyVapiWebhook, async (req, res) => {
 });
 
 // ─── PHANTOM BUSTER WEBHOOK ───
-// Google Maps Search Export results: parse US state out of an address string.
 function parseStateFromItem(item) {
   if (item.state && typeof item.state === 'string') {
     const m = item.state.toUpperCase().match(/\b[A-Z]{2}\b/);
     if (m) return m[0];
   }
   const addr = item.address || item.fullAddress || item.location || '';
-  // e.g. "123 Main St, Detroit, MI 48201" or "Houston, TX"
   const m = String(addr).match(/,\s*([A-Z]{2})\b(?:\s+\d{5}(?:-\d{4})?)?\s*$/i)
          || String(addr).match(/\b([A-Z]{2})\s+\d{5}(?:-\d{4})?\b/i);
   return m ? m[1].toUpperCase() : null;
 }
 
-// National megacarriers & chains that will never buy from an independent
-// agent — skip them so Brady doesn't burn Vapi minutes on 800-numbers.
-// Matched as case-insensitive substrings against the business name.
 const SKIP_BUSINESS_NAMES = [
   'fedex', 'ups', 'usps', 'dhl',
   'old dominion', 'abf freight', 'estes express', 'saia', 'tforce',
@@ -549,7 +526,6 @@ function isSkippableBusiness(name) {
   return SKIP_BUSINESS_NAMES.some(skip => n.includes(skip));
 }
 
-// Parse a value that may be an array OR a JSON-encoded string of an array.
 function parseMaybeStringArray(raw) {
   if (Array.isArray(raw) && raw.length) return raw;
   if (typeof raw === 'string') {
@@ -566,7 +542,6 @@ function parseMaybeStringArray(raw) {
   return null;
 }
 
-// Pull a resultObject array out of a fetch-output API response, defensively.
 function extractResultObject(data) {
   if (!data) return null;
   const direct = parseMaybeStringArray(data.resultObject) || parseMaybeStringArray(data.results);
@@ -577,20 +552,16 @@ function extractResultObject(data) {
     if (nested) return nested;
   }
   if (typeof out === 'string') {
-    // Output may be log text with JSON containing resultObject embedded
     const idx = out.indexOf('"resultObject"');
     if (idx !== -1) {
-      // Try parsing the whole string first
       try {
         const parsed = JSON.parse(out);
         const nested = parseMaybeStringArray(parsed?.resultObject);
         if (nested) return nested;
       } catch (_) { /* not full JSON */ }
-      // Fallback: find the array start after "resultObject":
       try {
         const arrStart = out.indexOf('[', idx);
         if (arrStart !== -1) {
-          // Find matching closing bracket
           let depth = 0, inStr = false, esc = false;
           for (let i = arrStart; i < out.length; i++) {
             const c = out[i];
@@ -624,11 +595,9 @@ router.post('/webhook/phantom', verifyPhantomWebhook, async (req, res) => {
 
     const body = req.body || {};
 
-    // Case A: results included directly in the webhook body.
     let results = parseMaybeStringArray(body.resultObject)
                || parseMaybeStringArray(body.results);
 
-    // Case B: completion NOTIFICATION — must fetch actual results from Phantom API
     if (!results) {
       const agentId = body.agentId || body.agent_id || body.agent
                    || body.data?.agentId || body.data?.agent_id || null;
@@ -653,7 +622,6 @@ router.post('/webhook/phantom', verifyPhantomWebhook, async (req, res) => {
           }
         } catch (err) {
           console.error('❌ Phantom fetch-output failed:', err.response?.status, err.response?.data || err.message);
-          // Still 200 — don't let Phantom retry-storm us
           return res.json({ received: true, processed: 0, queued: 0, reason: 'fetch-output error', error: err.message });
         }
       } else {
@@ -729,10 +697,6 @@ router.post('/webhook/phantom', verifyPhantomWebhook, async (req, res) => {
 });
 
 // ─── BREVO ENGAGEMENT WEBHOOK ───
-// Set the webhook URL in Brevo (Transactional > Webhooks) to:
-//   {BASE_URL}/webhook/brevo?secret={BREVO_WEBHOOK_SECRET}
-// Opens/clicks escalate engaged email-only leads: Dave gets alerted, Apollo
-// phone reveal fires, Brady calls once a number lands.
 router.post('/webhook/brevo', async (req, res) => {
   if (config.BREVO_WEBHOOK_SECRET && req.query.secret !== config.BREVO_WEBHOOK_SECRET) {
     return res.status(401).json({ error: 'Invalid webhook secret' });
@@ -741,7 +705,6 @@ router.post('/webhook/brevo', async (req, res) => {
     console.warn('⚠️ BREVO_WEBHOOK_SECRET not set — /webhook/brevo is unauthenticated');
   }
   try {
-    // Brevo may batch or send single events — normalize to array
     const events = Array.isArray(req.body) ? req.body : [req.body];
     const results = [];
     for (const evt of events) {
@@ -755,7 +718,6 @@ router.post('/webhook/brevo', async (req, res) => {
 });
 
 // ─── APOLLO PHONE-REVEAL WEBHOOK ───
-// engagement.js passes ?leadId= in the webhook_url so matching is exact.
 router.post('/webhook/apollo/phones', async (req, res) => {
   if (config.APOLLO_WEBHOOK_SECRET && req.query.secret !== config.APOLLO_WEBHOOK_SECRET) {
     return res.status(401).json({ error: 'Invalid webhook secret' });
@@ -767,6 +729,28 @@ router.post('/webhook/apollo/phones', async (req, res) => {
     console.error('❌ Apollo phone webhook error:', error);
     res.status(200).json({ received: true, error: error.message });
   }
+});
+
+// ─── NEXUS CHAT WIDGET WEBHOOK ───
+// Public endpoint (the widget sits on nexusgpartners.net and POSTs here).
+// No secret: payload is just a name/phone/email — worst case is a junk lead,
+// and dedupe + compliance gate catch abuse.
+router.post('/webhook/nexus-chat', async (req, res) => {
+  try {
+    const result = await handleNexusChatLead(req.body);
+    res.json({ received: true, ...result });
+  } catch (error) {
+    console.error('❌ Nexus chat webhook error:', error);
+    res.status(200).json({ received: true, ok: false, error: error.message });
+  }
+});
+
+// ─── NEXUS CHAT WIDGET CONFIG (public, safe values only) ───
+router.get('/api/nexus-chat-config', (req, res) => {
+  res.json({
+    agentPhone: process.env.AGENT_PHONE_DISPLAY || null,
+    brand: 'Nexus Growth Partners'
+  });
 });
 
 // ─── ENGAGEMENT FEED (admin, phone-viewable) ───
@@ -800,7 +784,7 @@ router.get('/admin/status', requireAdminKey, async (req, res) => {
   } catch (err) {
     counts = { error: err.message, unavailable: true };
   }
-  
+
   let stats = null;
   try {
     const today = new Date();
@@ -809,7 +793,7 @@ router.get('/admin/status', requireAdminKey, async (req, res) => {
   } catch (err) {
     console.error('dailyStat lookup failed:', err.message);
   }
-  
+
   res.json({
     queue: counts,
     today: stats || { leadsIngested: 0, callsMade: 0, qualified: 0 },
@@ -927,7 +911,7 @@ router.get('/admin/costs', requireAdminKey, async (req, res) => {
     _sum: { amount: true },
     _count: true
   });
-  
+
   res.json(costs);
 });
 
