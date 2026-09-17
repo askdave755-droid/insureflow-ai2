@@ -6,6 +6,7 @@ const { isBusinessHours, getNextBusinessTime } = require('../lib/validate');
 const { analyzeCall } = require('../lib/qualify');
 const { handleLifeCallDone } = require('../lib/lifePipeline');
 const { handleCallOutcome, createTask } = require('../lib/followup');
+const { canDial, markDialing, markEnded } = require('../lib/callSemaphore');
 
 callQueue.process('make-call', 3, async (job) => {
   const { leadId, force } = job.data;
@@ -30,6 +31,22 @@ callQueue.process('make-call', 3, async (job) => {
     return { rescheduled: true, nextCall: nextTime };
   }
   
+  // Vapi concurrency gate — requeue with jittered backoff instead of slamming
+  // the API and burning the daily cap on 'Over Concurrency Limit' rejections.
+  // Returns cleanly so Bull does not count this as a failure or a retry attempt.
+  if (!force && !(await canDial())) {
+    await prisma.lead.update({
+      where: { id: leadId },
+      data: { status: 'pending' }
+    });
+    await callQueue.add('make-call', { leadId }, {
+      delay: 30000 + Math.floor(Math.random() * 30000),
+      priority: 5,
+      jobId: `gate-${leadId}-${Date.now()}`
+    });
+    return { requeued: 'concurrency' };
+  }
+
   // Update status + count the attempt (Phase 3 — retry engine uses this)
   await prisma.lead.update({
     where: { id: leadId },
@@ -40,12 +57,27 @@ callQueue.process('make-call', 3, async (job) => {
   const result = await makeCall(lead);
   
   if (!result.success) {
+    const msg = result.error || '';
+    if (msg.includes('Concurrency') || msg.includes('concurrency')) {
+      // Vapi-side limit hit anyway (race with another worker) — long backoff,
+      // no failure status, no cap penalty (cap counts accepted dials only).
+      await prisma.lead.update({ where: { id: leadId }, data: { status: 'pending' } });
+      await callQueue.add('make-call', { leadId }, {
+        delay: 60000 + Math.floor(Math.random() * 30000),
+        priority: 5,
+        jobId: `vlimit-${leadId}-${Date.now()}`
+      });
+      console.log(`⏳ Vapi concurrency hit — requeued ${leadId} in ~60-90s`);
+      return { requeued: 'vapi_concurrency' };
+    }
     await prisma.lead.update({
       where: { id: leadId },
       data: { status: 'failed' }
     });
     throw new Error(`Call failed: ${result.error}`);
   }
+
+  await markDialing(result.callId);
   
   // Save call log
   await prisma.callLog.create({
@@ -92,6 +124,8 @@ async function handleVapiWebhook(webhookData) {
 
   const callId = message.call?.id;
   if (!callId) throw new Error('Missing call ID');
+
+  await markEnded(callId); // release concurrency slot
 
   const transcript = message.artifact?.transcript || message.transcript || '';
   const summary = message.analysis?.summary || message.summary || '';
