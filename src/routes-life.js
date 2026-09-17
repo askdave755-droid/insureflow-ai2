@@ -103,7 +103,7 @@ function attachLifeRoutes(app, pool) {
 
   // ── CALL ENGINE START / STOP (backs public/calls.html) ──
   // Stop = Bull global pause (stored in Redis — survives Railway redeploys).
-  // Start = sweep pending life leads into the queue (90s spacing) + resume.
+  // Start = sweep pending life leads into the queue (12s drip) + resume.
   // Job IDs are 'life-<leadId>' so repeat taps can't double-queue a lead.
   // The worker enforces business hours per lead state — after-hours leads
   // self-reschedule to the next calling window.
@@ -136,13 +136,13 @@ function attachLifeRoutes(app, pool) {
 
       for (let i = 0; i < leads.length; i++) {
         await callQueue.add('make-call', { leadId: leads[i].id },
-          { delay: 5000 + i * 90000, priority: 5, jobId: 'life-' + leads[i].id });
+          { delay: 5000 + i * 12000, priority: 5, jobId: 'life-' + leads[i].id });
       }
       await callQueue.resume();
-      console.log('▶️ Life calls START: ' + leads.length + ' queued (90s spacing), queue resumed');
+      console.log('▶️ Life calls START: ' + leads.length + ' queued (12s drip), queue resumed');
       res.json({
         queued: leads.length,
-        spacingSeconds: 90,
+        spacingSeconds: 12,
         queue: 'resumed',
         note: 'Worker enforces business hours per lead state — after-hours leads self-reschedule.'
       });
@@ -459,7 +459,7 @@ function attachLifeRoutes(app, pool) {
         results.ids.push(lead.id);
 
         if (req.body.autoCall === true) {
-          await callQueue.add('make-call', { leadId: lead.id }, { delay: 5000 + results.queued * 90000, priority: 5 });
+          await callQueue.add('make-call', { leadId: lead.id }, { delay: 5000 + results.queued * 12000, priority: 5 });
           results.queued++;
         }
       } catch (e) { results.errors++; }
