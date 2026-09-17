@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!-- ============================================================
-  NEXUS CHAT QUOTE MACHINE  v2.4 (+ instant callback button)
+  NEXUS CHAT QUOTE MACHINE  v2.5 (fix: typing during chip options no longer stalls)
   Duplicates the VAPI voice qualification flow in chat form.
 
   Hosted at: https://insureflow-ai2-production.up.railway.app/nexus-chat.html
@@ -95,15 +95,28 @@ function bot(text, delay=500){
 function user(text){ const d=document.createElement("div");
   d.className="nxq-msg nxq-user"; d.textContent=text; msgs.appendChild(d); scroll(); }
 function options(list){
-  return new Promise(res=>{ const w=document.createElement("div"); w.className="nxq-opts";
+  return new Promise(res=>{ nxqInputActive=false;
+    const w=document.createElement("div"); w.className="nxq-opts";
     list.forEach(o=>{ const b=document.createElement("button"); b.className="nxq-opt";
       b.textContent=o.label; b.onclick=()=>{ w.remove(); user(o.label);
-        state.data[o.key]=o.value; res(o.value); };
+        state.data[o.key]=o.value;
+        $("#nxq-send").onclick=null; field.onkeydown=null; res(o.value); };
       w.appendChild(b); });
-    msgs.appendChild(w); scroll(); });
+    msgs.appendChild(w); scroll();
+    // typed text while chips are up = off-script question, never a dead end
+    const go=async()=>{ const v=field.value.trim();
+      if(!v) return;
+      field.value=""; user(v);
+      const ans = await askBrain(v);
+      await bot(ans, 300);
+      await bot("Tap one of the options above to continue.", 350); };
+    $("#nxq-send").onclick=go;
+    field.onkeydown=e=>{ if(e.key==="Enter") go(); };
+  });
 }
 let nxqSession = null;
 let nxqCurrentQ = "";                    // what we last asked (used to re-ask)
+let nxqInputActive = false;                // true only while a typed-answer question is live
 
 async function askBrain(message){
   if(!NXQ_CONFIG.BRAIN_URL){
@@ -126,17 +139,19 @@ async function askBrain(message){
 function input(validate, promptLabel){
   if(promptLabel) nxqCurrentQ = promptLabel;
   return new Promise(async res=>{
-    const go=async()=>{ const v=field.value.trim();
+    nxqInputActive = true;
+    const go=async()=>{ if(!nxqInputActive) return;
+      const v=field.value.trim();
       if(!v) return;
       if(validate && !validate(v)){
-        field.value=""; user(v);
+        field.value=""; user(v); nxqInputActive=false;
         const ans = await askBrain(v);
         await bot(ans, 300);
         await bot("Back to the estimate — " + nxqCurrentQ, 400);
         res(await input(validate));
         return;
       }
-      field.value=""; user(v); res(v); };
+      field.value=""; user(v); nxqInputActive=false; res(v); };
     $("#nxq-send").onclick=go;
     field.onkeydown=e=>{ if(e.key==="Enter") go(); };
     field.focus();
