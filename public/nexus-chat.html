@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!-- ============================================================
-  NEXUS CHAT QUOTE MACHINE  v2.2 (InsureFlow-integrated + smart-embed)
+  NEXUS CHAT QUOTE MACHINE  v2.4 (+ instant callback button)
   Duplicates the VAPI voice qualification flow in chat form.
 
   Hosted at: https://insureflow-ai2-production.up.railway.app/nexus-chat.html
@@ -61,6 +61,7 @@ const NXQ_CONFIG = {
   AGENT_PHONE: "",                          // fetched live from /api/nexus-chat-config
   ONLINE_LINK: "https://insuremenowdirect.com/agent/dawudrafael/",
   WEBHOOK: NXQ_ORIGIN + "/webhook/nexus-chat",
+  CALL: NXQ_ORIGIN + "/api/nexus-chat-call",
   BRAND: "Nexus Growth Partners",
   BRAIN_URL: "",                            // future: AI answers to off-script questions
 };
@@ -162,13 +163,22 @@ function saveLead(){
   try{ localStorage.setItem("nxq_lead_"+Date.now(), JSON.stringify(state.data)); }catch(e){}
   if(NXQ_CONFIG.WEBHOOK){
     fetch(NXQ_CONFIG.WEBHOOK,{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify(state.data)}).catch(()=>{});
+      body:JSON.stringify(state.data)})
+      .then(r=>r.json()).then(d=>{ if(d && d.leadId) state.data.leadId = d.leadId; })
+      .catch(()=>{});
   }
 }
 function linkWithParams(){
   const d = state.data, u = new URL(NXQ_CONFIG.ONLINE_LINK);
   ["name","phone","email","zip","coverage","term","product"].forEach(k=>{
     if(d[k]) u.searchParams.set(k, d[k]); });
+  u.searchParams.set("utm_source","nexus_chat"); u.searchParams.set("utm_medium","widget");
+  return u.toString();
+}
+function commercialLink(){
+  const u = new URL("https://www.nexusgpartners.net/quote");
+  u.searchParams.set("line","commercial");
+  if(state.data.bizType) u.searchParams.set("niche", state.data.bizType);
   u.searchParams.set("utm_source","nexus_chat"); u.searchParams.set("utm_medium","widget");
   return u.toString();
 }
@@ -181,13 +191,34 @@ Pick whichever is easier:`;
   const c=document.createElement("div"); c.className="nxq-cta";
   let cta = "";
   if(NXQ_CONFIG.AGENT_PHONE){
-    cta += `<a class="nxq-call" href="tel:${NXQ_CONFIG.AGENT_PHONE}">📞 Talk to an agent now</a>`;
+    cta += `<a class="nxq-call" href="#" id="nxq-callme">📞 Have an agent call me now</a>`;
   }
-  cta += `<a class="nxq-link" href="${linkWithParams()}" target="_blank" rel="noopener">Continue online → instant quote</a>`;
+  if(state.data.product==="commercial"){
+    cta += `<a class="nxq-link" href="${commercialLink()}" target="_blank" rel="noopener">Start my business quote →</a>`;
+  }else{
+    cta += `<a class="nxq-link" href="${linkWithParams()}" target="_blank" rel="noopener">Continue online → instant quote</a>`;
+  }
   c.innerHTML = cta;
   const f=document.createElement("div"); f.className="nxq-fine";
   f.textContent="Estimate is educational only, not a binding quote. Rates depend on carrier underwriting. "+NXQ_CONFIG.BRAND+" · Licensed in Michigan";
   msgs.append(w,c,f); scroll();
+  const cb = document.getElementById("nxq-callme");
+  if(cb) cb.onclick = async e=>{
+    e.preventDefault();
+    cb.textContent = "⏳ Connecting you now…"; cb.style.pointerEvents = "none";
+    try{
+      const r = await fetch(NXQ_CONFIG.CALL,{method:"POST",headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ leadId: state.data.leadId || null, phone: state.data.phone, name: state.data.name })});
+      const d = await r.json();
+      if(d && d.ok !== false){
+        cb.textContent = "✓ Agent is calling you — keep your phone close";
+      }else{
+        cb.textContent = "📞 Call us: " + NXQ_CONFIG.AGENT_PHONE; cb.href = "tel:" + NXQ_CONFIG.AGENT_PHONE; cb.style.pointerEvents = "";
+      }
+    }catch(_){
+      cb.textContent = "📞 Call us: " + NXQ_CONFIG.AGENT_PHONE; cb.href = "tel:" + NXQ_CONFIG.AGENT_PHONE; cb.style.pointerEvents = "";
+    }
+  };
 }
 
 /* ---------- flows ---------- */
@@ -197,6 +228,20 @@ async function contactThen(productLabel){
   await bot("And your email?");         state.data.email = await input(isEmail, "and your email?");
   await bot("Got it — one of our licensed agents will follow up shortly.", 400);
   handoff(productLabel, null);
+}
+async function commercialFlow(){
+  await bot("Perfect — that's our specialty. For business and trucking, the fastest path is our 2-minute quote form on the site: it covers your business type, coverages, and lets you snap a photo of your current policy so we can beat it.");
+  await bot("What kind of operation is it?");
+  state.data.bizType = await options([
+    {label:"🚛 Trucking / fleet", value:"trucking", key:"bizType"},
+    {label:"🏗️ Contractor / trade", value:"contractor", key:"bizType"},
+    {label:"🍽️ Food service", value:"food_service", key:"bizType"},
+    {label:"🏪 Other business", value:"other", key:"bizType"}]);
+  await bot("First name?");    state.data.name = await input(null, "first name?");
+  await bot("Phone?");         state.data.phone = await input(isPhone, "phone number?");
+  await bot("Email?");         state.data.email = await input(isEmail, "email?");
+  await bot("Got it — everything below is ready for you.", 400);
+  handoff("Commercial / trucking", null);
 }
 async function termFlow(){
   await bot("Great choice — term life is usually the cheapest way to protect a young family. A few quick questions:");
@@ -241,7 +286,8 @@ async function termFlow(){
       {label:"🚛 My business / trucking",         value:"commercial", key:"product"},
       {label:"🤔 Not sure yet",                  value:"unknown",   key:"product"}]);
     if(state.data.product==="term_life") termFlow();
-    else contactThen({disability:"Disability income",commercial:"Commercial / trucking",unknown:"Coverage review"}[state.data.product]);
+    else if(state.data.product==="commercial") commercialFlow();
+    else contactThen({disability:"Disability income",unknown:"Coverage review"}[state.data.product]);
   });
 })();
 </script>
