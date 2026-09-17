@@ -40,8 +40,21 @@ app.use(rateLimit({
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Static dashboard
-app.use(express.static('public'));
+// Static dashboard (+ nexus-chat widget)
+// The chat widget (public/nexus-chat.html) is iframed by nexusgpartners.net,
+// so for THAT FILE ONLY we relax frame headers: drop X-Frame-Options and
+// extend CSP frame-ancestors to the agency site. Every other page keeps
+// helmet's full lockdown.
+const WIDGET_CSP = "default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self' https://nexusgpartners.net https://www.nexusgpartners.net;img-src 'self' data:;object-src 'none';script-src 'self' 'unsafe-inline';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests";
+app.use(express.static('public', {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('nexus-chat.html')) {
+      res.removeHeader('X-Frame-Options');
+      res.setHeader('Content-Security-Policy', WIDGET_CSP);
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    }
+  }
+}));
 
 // Test route to verify router mounting
 app.get('/test-router', (req, res) => {
