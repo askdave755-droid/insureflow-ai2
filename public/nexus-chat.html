@@ -1,19 +1,11 @@
 <!DOCTYPE html>
 <!-- ============================================================
-  NEXUS CHAT QUOTE MACHINE  v2.1 (InsureFlow-integrated)  (single-file embeddable widget)
+  NEXUS CHAT QUOTE MACHINE  v2.2 (InsureFlow-integrated + smart-embed)
   Duplicates the VAPI voice qualification flow in chat form.
 
   Hosted at: https://insureflow-ai2-production.up.railway.app/nexus-chat.html
-  Embed on nexusgpartners.net with:
-    <iframe src="https://insureflow-ai2-production.up.railway.app/nexus-chat.html"
-            style="position:fixed;bottom:0;right:0;width:120px;height:120px;border:none;z-index:9998;pointer-events:auto"
-            id="nxq-frame" title="Chat quote"></iframe>
-  (or paste the whole file inline before </body> — it is self-contained)
-
-  Leads POST to /webhook/nexus-chat on InsureFlow -> land in the pipeline,
-  Brady call queued at priority 1, Dave alerted by email.
-  "Talk to an agent" number is fetched live from /api/nexus-chat-config
-  (Railway env AGENT_PHONE_DISPLAY) — change it there, not here.
+  Posts "nxq-open" / "nxq-close" to the parent window so the host page can
+  resize the iframe (keeps the host site clickable when chat is closed).
   ============================================================ -->
 <html lang="en">
 <head>
@@ -78,6 +70,11 @@ const $ = s => document.querySelector(s);
 const msgs = $("#nxq-msgs"), field = $("#nxq-field");
 const state = { data: { source: "nexus_chat", lane: "WEB" } };
 
+/* tell the host page (if smart-embedded) to grow/shrink the iframe */
+function tellParent(msg){
+  try{ if(window.parent && window.parent !== window) window.parent.postMessage(msg, "*"); }catch(e){}
+}
+
 /* pull the live agent number; fall back to hiding the call CTA */
 (async function loadCfg(){
   try{
@@ -107,8 +104,6 @@ function options(list){
 let nxqSession = null;
 let nxqCurrentQ = "";                    // what we last asked (used to re-ask)
 
-/* If the user typed something off-script (validation failed), route it to
-   the chat brain, show the educational answer, then resume the funnel. */
 async function askBrain(message){
   if(!NXQ_CONFIG.BRAIN_URL){
     return "Good question — a licensed agent can give you the exact answer. "
@@ -134,11 +129,10 @@ function input(validate, promptLabel){
       if(!v) return;
       if(validate && !validate(v)){
         field.value=""; user(v);
-        // ---- off-script: brain answers, funnel resumes ----
         const ans = await askBrain(v);
         await bot(ans, 300);
         await bot("Back to the estimate — " + nxqCurrentQ, 400);
-        res(await input(validate));          // re-ask same step
+        res(await input(validate));
         return;
       }
       field.value=""; user(v); res(v); };
@@ -156,7 +150,7 @@ const isAge  = v=>{ const n=+v; return n>=18 && n<=85; };
 function estimate(d){
   const base = d.tobacco==="yes" ? 1.9 : 1.0;
   const ageFactor = Math.max(0.6, (d.age-20)*0.09 + 0.55);
-  const per1000 = 0.11 * base * ageFactor;            // $ per $1k of coverage / month
+  const per1000 = 0.11 * base * ageFactor;
   const monthly = per1000 * (d.coverage/1000);
   const lo = Math.max(8, Math.round(monthly*0.85)), hi = Math.round(monthly*1.25);
   return `$${lo} – $${hi}/mo`;
@@ -226,9 +220,17 @@ async function termFlow(){
 }
 
 /* ---------- entry ---------- */
-(async function main(){
-  $("#nxq-launch").onclick=()=>$("#nxq-panel").classList.toggle("open");
-  $("#nxq-close").onclick=()=>$("#nxq-panel").classList.remove("open");
+(function main(){
+  const panel = $("#nxq-panel");
+  $("#nxq-launch").onclick=()=>{
+    const opening = !panel.classList.contains("open");
+    panel.classList.toggle("open");
+    tellParent(opening ? "nxq-open" : "nxq-close");
+  };
+  $("#nxq-close").onclick=()=>{
+    panel.classList.remove("open");
+    tellParent("nxq-close");
+  };
   let started=false;
   $("#nxq-launch").addEventListener("click", async ()=>{
     if(started) return; started=true;
