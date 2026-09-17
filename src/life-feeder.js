@@ -96,9 +96,9 @@ async function feedLife() {
     cursors[key] = start + rows.length;
 
     if (stats.imported > 0) {
-      // Queue the fresh life leads for calling (240s spacing — sized to Vapi
-      // concurrency so we don't hit the concurrent-call limit; business-hours
-      // enforced by worker)
+      // Queue the fresh life leads for calling (12s drip — the Redis
+      // concurrency semaphore in the worker is now the real throttle, so we
+      // feed steadily instead of spacing wide; business-hours enforced by worker)
       const fresh = await prisma.lead.findMany({
         where: { vertical: 'life_fe', source: 'hasdata_maps', status: 'pending' },
         orderBy: { createdAt: 'desc' },
@@ -107,7 +107,7 @@ async function feedLife() {
       });
       for (let i = 0; i < fresh.length; i++) {
         await callQueue.add('make-call', { leadId: fresh[i].id },
-          { delay: 5000 + i * 240000, priority: 5, jobId: 'life-' + fresh[i].id });
+          { delay: 5000 + i * 12000, priority: 5, jobId: 'life-' + fresh[i].id });
       }
       console.log(`💚 Life feeder: queued ${fresh.length} life leads for calling`);
     }
