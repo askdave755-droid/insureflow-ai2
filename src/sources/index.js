@@ -188,6 +188,7 @@ async function fetchApolloContacts(state, city, limit = 100, opts = {}) {
         {
           person_titles: titles,
           person_locations: [`${city}, ${state}, US`],
+          person_phone_present: true, // only pull contacts with a dialable number
           ...(singleKeyword ? { q_keywords: singleKeyword } : {}),
           per_page: perPage,
           page
