@@ -14,6 +14,7 @@ const { callQueue } = require('../queue');
 const { formatPhoneE164, isBusinessHours, getNextBusinessTime } = require('./validate');
 const { createTask } = require('./followup');
 const { brevoEmail } = require('./brevo');
+const { makeCall } = require('./vapi');
 
 const PRODUCT_LABELS = {
   term_life: 'Term life',
@@ -104,4 +105,48 @@ async function handleNexusChatLead(body) {
   return { ok: true, leadId: lead.id, vertical, queued };
 }
 
-module.exports = { handleNexusChatLead };
+// Instant callback: the widget's "have an agent call me now" button.
+// Retries a couple of times in case the chat lead POST is still committing.
+async function handleNexusChatCall(body) {
+  const b = body || {};
+  const phone = formatPhoneE164(b.phone || '');
+  if (!phone) return { ok: false, reason: 'bad_phone' };
+
+  let lead = null;
+  for (let i = 0; i < 3 && !lead; i++) {
+    lead = await prisma.lead.findFirst({
+      where: { phone, source: 'nexus_chat', status: { notIn: ['closed', 'compliance_hold', 'converted'] } },
+      orderBy: { createdAt: 'desc' }
+    });
+    if (!lead) await new Promise(r => setTimeout(r, 1500));
+  }
+  if (!lead) return { ok: false, reason: 'lead_not_found' };
+
+  const result = await makeCall(lead);
+  if (!result.success) return { ok: false, leadId: lead.id, error: result.error };
+
+  await createTask({
+    leadId: lead.id,
+    type: 'FOLLOW_UP',
+    title: `📞 Instant callback placed: ${lead.name}`,
+    notes: `Visitor tapped "call me now" in the Nexus chat widget. Vapi callId ${result.callId}. If it went to voicemail, call back personally — hottest possible inbound.`,
+    dueAt: new Date(Date.now() + 1800000),
+    priority: 'hot'
+  });
+
+  const alertTo = process.env.DAVE_ALERT_EMAIL;
+  if (alertTo) {
+    brevoEmail(
+      alertTo,
+      `📞 Instant callback fired: ${lead.name} (${phone})`,
+      `<p>A website visitor just tapped <b>call me now</b> in the Nexus chat widget.</p>
+       <p><b>${lead.name}</b> — ${phone}</p>
+       <p>Vapi is dialing them right now (callId ${result.callId}). If no answer, this is a priority callback for you.</p>`
+    ).catch(err => console.error('⚠️ Nexus instant-call alert failed:', err.message));
+  }
+
+  console.log(`📞 Nexus instant call: ${lead.name} ${phone} -> callId ${result.callId}`);
+  return { ok: true, leadId: lead.id, callId: result.callId };
+}
+
+module.exports = { handleNexusChatLead, handleNexusChatCall };
