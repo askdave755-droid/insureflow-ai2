@@ -21,7 +21,7 @@ const { requireAdminKey, verifyVapiWebhook, verifyPhantomWebhook, actorFromReque
 const { auditMiddleware, audit } = require('./lib/audit');
 const { checkContactPermission, addToDnc, recordConsent } = require('./lib/compliance');
 const { handleBrevoEvent, handleApolloPhoneWebhook, recentEngagement } = require('./lib/engagement');
-const { handleNexusChatLead } = require('./lib/nexusChat');
+const { handleNexusChatLead, handleNexusChatCall } = require('./lib/nexusChat');
 
 const router = express.Router();
 router.use(auditMiddleware());
@@ -741,6 +741,20 @@ router.post('/webhook/nexus-chat', async (req, res) => {
     res.json({ received: true, ...result });
   } catch (error) {
     console.error('❌ Nexus chat webhook error:', error);
+    res.status(200).json({ received: true, ok: false, error: error.message });
+  }
+});
+
+// ─── NEXUS CHAT INSTANT CALLBACK ───
+// Widget "call me now" button — public, fires a Vapi outbound call to the
+// visitor within seconds. Phone-only payload; if no chat lead exists for the
+// number we no-op instead of cold-calling a stranger.
+router.post('/api/nexus-chat-call', async (req, res) => {
+  try {
+    const result = await handleNexusChatCall(req.body);
+    res.json({ received: true, ...result });
+  } catch (error) {
+    console.error('❌ Nexus chat instant-call error:', error);
     res.status(200).json({ received: true, ok: false, error: error.message });
   }
 });
