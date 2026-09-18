@@ -8,6 +8,39 @@ const { handleLifeCallDone } = require('../lib/lifePipeline');
 const { handleCallOutcome, createTask } = require('../lib/followup');
 const { canDial, markDialing, markEnded } = require('../lib/callSemaphore');
 
+// PATCH-1 helpers: phone fallback + pending report queue
+const pendingReports = new Map(); // callId -> {message, expires}
+const PENDING_TTL_MS = 5 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of pendingReports) if (v.expires < now) pendingReports.delete(k);
+}, 60 * 1000).unref();
+
+function normalizePhoneE164(raw) {
+  if (!raw) return null;
+  const digits = String(raw).replace(/\D/g, '');
+  const d = digits.length === 10 ? '1' + digits : digits;
+  return d.length === 11 && d.startsWith('1') ? '+' + d : null;
+}
+
+async function resolveLeadForReport(message) {
+  const callId = message?.call?.id;
+  let lead = callId
+    ? await prisma.lead.findFirst({ where: { vapiCallId: callId } })
+    : null;
+  if (lead) return { lead, via: 'vapiCallId' };
+  const called = normalizePhoneE164(
+    message?.call?.phoneNumber || message?.call?.customer?.number);
+  if (called) {
+    lead = await prisma.lead.findFirst({
+      where: { phone: called, status: 'calling' },
+      orderBy: { updatedAt: 'desc' },
+    });
+    if (lead) return { lead, via: 'phone' };
+  }
+  return { lead: null, via: null };
+}
+
 callQueue.process('make-call', 3, async (job) => {
   const { leadId, force } = job.data;
   
@@ -144,17 +177,47 @@ async function handleVapiWebhook(webhookData) {
   });
 
   if (!callLog) {
-    console.error('❌ Call log not found for Vapi call ID:', callId);
-    const orphanLead = await prisma.lead.findFirst({ where: { vapiCallId: callId } });
+    let orphanLead = await prisma.lead.findFirst({ where: { vapiCallId: callId } });
+    let via = 'vapiCallId';
     if (!orphanLead) {
-      console.error('❌ No lead found with vapiCallId either:', callId);
-      return { error: 'callLog not found', callId };
+      const resolved = await resolveLeadForReport(message);
+      orphanLead = resolved.lead;
+      via = resolved.via;
+      if (orphanLead && via === 'phone') {
+        console.warn(`📞 end-of-call-report ${callId} matched lead ${orphanLead.id} by phone (worker race) — backfilling vapiCallId`);
+        await prisma.lead.update({
+          where: { id: orphanLead.id },
+          data: { vapiCallId: callId },
+        }).catch(() => {});
+      }
     }
-    console.log(`⚠️ Found lead ${orphanLead.id} by vapiCallId but no CallLog row — creating one`);
-    const newLog = await prisma.callLog.create({
-      data: { leadId: orphanLead.id, callId, status: message.call?.status || 'ended', duration, transcript, summary, recordingUrl }
+    if (!orphanLead) {
+      // Worker DB writes may not have committed yet — retry once in 30s.
+      if (!pendingReports.has(callId)) {
+        pendingReports.set(callId, { message, expires: Date.now() + PENDING_TTL_MS });
+        console.warn(`⏳ end-of-call-report ${callId} unmatched — queued for 30s retry`);
+        setTimeout(async () => {
+          const p = pendingReports.get(callId);
+          if (!p) return; // already resolved another way
+          pendingReports.delete(callId);
+          await handleVapiWebhook(p.message).catch(e =>
+            console.error(`retry end-of-call-report ${callId} failed:`, e.message));
+        }, 30000);
+      }
+      return { queued: true, callId }; // NOT an error — queued or duplicate
+    }
+    console.log(`⚠️ No CallLog row for ${callId} — creating one (via ${via})`);
+    callLog = await prisma.callLog.create({
+      data: {
+        leadId: orphanLead.id,
+        callId,
+        status: message.call?.status || 'ended',
+        duration,
+        transcript,
+        summary,
+        recordingUrl
+      }
     });
-    callLog = { ...newLog, lead: orphanLead };
   }
 
   const lead = await prisma.lead.findUnique({ where: { id: callLog.leadId } });
@@ -186,6 +249,7 @@ async function handleVapiWebhook(webhookData) {
         recordingUrl
       }
     });
+
     await prisma.lead.update({
       where: { id: lead.id },
       data: { lastDisposition: disposition }
