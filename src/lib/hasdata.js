@@ -19,6 +19,12 @@
  *   - Per-row try/catch: one bad row logs a warning and is counted as an error,
  *     not allowed to abort the whole batch.
  *   - Address parser now also matches 'City, ST' with no ZIP.
+ *
+ * 2026-09-17 PATCH 3:
+ *   - parseCityState detects Canadian postal codes (N8X 1X1) and returns
+ *     'CA-ON'-style markers so the skip log says foreign, not unparsed.
+ *   - importHasDataRows logs per-run skip-reason counters.
+ *   - Detroit zoom tightened 12z -> 13z to reduce Windsor bleed.
  */
 const axios = require('axios');
 const { detectOccupation } = require('./occupations');
@@ -32,7 +38,7 @@ const HASDATA_BASE = 'https://api.hasdata.com/scrape/google-maps';
 // Licensed launch states only (MI, AZ, TN, FL). Key = 'city, st' lowercase.
 const CITY_COORDS = {
   // Michigan
-  'detroit, mi':       '@42.3314,-83.0458,12z',
+  'detroit, mi':       '@42.3314,-83.0458,13z',
   'grand rapids, mi':  '@42.9634,-85.6681,12z',
   'lansing, mi':       '@42.7325,-84.5555,12z',
   'flint, mi':         '@43.0125,-83.6875,12z',
@@ -67,6 +73,11 @@ function parseCityState(address) {
   if (m) return { city: m[1].trim(), state: m[2].toUpperCase() };
   m = a.match(/,\s*([A-Z]{2})\s+\d{5}/);                       // street, ST zip (no city)
   if (m) return { city: null, state: m[1].toUpperCase() };
+  // Canadian postal code anywhere in the address -> mark foreign visibly
+  if (/[A-Z]\d[A-Z]\s?\d[A-Z]\d/i.test(a)) {
+    const prov = a.match(/,\s*([A-Z]{2})\s+[A-Z]\d[A-Z]/i);
+    return { city: null, state: 'CA-' + (prov ? prov[1].toUpperCase() : '??') };
+  }
   return { city: null, state: null };
 }
 
@@ -100,11 +111,12 @@ async function hasdataMapsSearch(query, ll, start = 0) {
 // Dedupe on place_id first (Google identity), then phone.
 async function importHasDataRows(rows, pool, query = null) {
   let imported = 0, skipped = 0, errors = 0;
+  const why = { no_phone: 0, foreign: 0, unlicensed_state: 0, duplicate: 0 };
   for (const row of rows) {
     try {
       const placeId = row.placeId || row.place_id || null;
       const phone = normalizePhone(row.phone || row.phoneNumber);
-      if (!phone) { skipped++; continue; }
+      if (!phone) { skipped++; why.no_phone++; continue; }
 
       const name = row.title || row.name || 'Business Owner';
       const { city, state } = parseCityState(row.address || row.fullAddress);
@@ -114,7 +126,13 @@ async function importHasDataRows(rows, pool, query = null) {
       // keeps non-licensed / non-US leads out of the pipeline.
       if (!state || !config.ALLOWED_STATES.includes(state)) {
         skipped++;
-        console.warn(`HasData skip (state "${state || 'unparsed'}" not licensed): ${name} ${phone}`);
+        if (state && state.startsWith('CA-')) {
+          why.foreign++;
+          console.warn(`HasData skip (foreign ${state}): ${name} ${phone}`);
+        } else {
+          why.unlicensed_state++;
+          console.warn(`HasData skip (state "${state || 'unparsed'}" not licensed): ${name} ${phone}`);
+        }
         continue;
       }
 
@@ -132,13 +150,13 @@ async function importHasDataRows(rows, pool, query = null) {
       // Dedupe: place_id first
       if (placeId) {
         const dup = await pool.query(`SELECT id FROM leads WHERE place_id=$1 LIMIT 1`, [placeId]);
-        if (dup.rows.length) { skipped++; continue; }
+        if (dup.rows.length) { skipped++; why.duplicate++; continue; }
       }
       const dup = await pool.query(
         `SELECT id FROM leads WHERE phone=$1 AND status NOT IN ('closed','compliance_hold') LIMIT 1`,
         [phone]
       );
-      if (dup.rows.length) { skipped++; continue; }
+      if (dup.rows.length) { skipped++; why.duplicate++; continue; }
 
       await pool.query(
         `INSERT INTO leads (id, name, phone, company, state, city, industry, occupation,
@@ -154,7 +172,10 @@ async function importHasDataRows(rows, pool, query = null) {
       console.warn(`HasData row insert failed (${row.title || row.name || 'unknown'}): ${e.message}`);
     }
   }
-  return { imported, skipped, errors };
+  console.log(`HasData import: ${imported} imported, ${skipped} skipped ` +
+    `(no_phone=${why.no_phone} foreign=${why.foreign} ` +
+    `unlicensed=${why.unlicensed_state} dup=${why.duplicate}), ${errors} errors`);
+  return { imported, skipped, errors, why };
 }
 
 module.exports = { CITY_COORDS, hasdataMapsSearch, importHasDataRows };
