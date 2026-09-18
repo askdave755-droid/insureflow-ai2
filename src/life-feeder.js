@@ -15,12 +15,12 @@ const config = require('./config');
  *   - Per-combo cursor kept in memory ('niche|city' -> start offset) so each run
  *     continues where that combo left off instead of re-scraping page 1 forever.
  *   - LIFE_DAILY_CAP env (default 45) stops the feeder for the day once that many
- *     life leads exist, protecting both HasData credits and Vapi spend.
+ *     life DIALS exist (call_logs joined to life_fe leads), protecting Vapi spend.
  *
  * Env:
  *   HASDATA_API_KEY    required (feeder no-ops without it)
  *   LIFE_FEED_ENABLE   '0' disables the cron (default on)
- *   LIFE_DAILY_CAP     max life leads per day (default 45 — sized to Vapi concurrency)
+ *   LIFE_DAILY_CAP     max life dials per day (default 45 — sized to Vapi concurrency)
  */
 
 // FE/life niches that convert for small-business-owner life insurance.
@@ -43,14 +43,17 @@ const CITIES = Object.keys(CITY_COORDS);
 
 const DAILY_CAP = parseInt(process.env.LIFE_DAILY_CAP || '45', 10);
 
-// Count today's life leads straight from the leads table — no extra table needed.
+// Count today's DIALS, not lead creations — the hourly Apollo ingestion also
+// creates life_fe leads and was burning the 45-dial cap by noon.
+// CallLog -> lead relation exists in the Prisma schema (call_logs.lead_id).
 async function getQueuedToday() {
-  const r = await pool.query(
-    `SELECT COUNT(*)::int AS n FROM leads
-     WHERE vertical='life_fe' AND created_at >= CURRENT_DATE`,
-    []
-  );
-  return r.rows[0].n;
+  const n = await prisma.callLog.count({
+    where: {
+      createdAt: { gte: new Date(new Date().setHours(0,0,0,0)) },
+      lead: { vertical: 'life_fe' },
+    },
+  });
+  return n;
 }
 
 // Simple in-memory cursor per niche|city (survives within a process run).
