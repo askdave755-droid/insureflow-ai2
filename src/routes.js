@@ -23,6 +23,9 @@ const { checkContactPermission, addToDnc, recordConsent } = require('./lib/compl
 const { handleBrevoEvent, handleApolloPhoneWebhook, recentEngagement } = require('./lib/engagement');
 const { handleNexusChatLead, handleNexusChatCall } = require('./lib/nexusChat');
 
+// Owner notifications inbox — env-overridable via OWNER_EMAIL.
+const OWNER_EMAIL = process.env.OWNER_EMAIL || 'nexusgpartners@gmail.com';
+
 const router = express.Router();
 router.use(auditMiddleware());
 
@@ -71,7 +74,7 @@ router.get('/test-email', requireAdminKey, async (req, res) => {
     }
 
     const testLead = {
-      email: 'askdave755@gmail.com',
+      email: OWNER_EMAIL,
       name: 'Dave Test',
       company: 'Test Trucking Co',
       state: 'MI'
@@ -172,7 +175,7 @@ router.get('/test-call/:phone', requireAdminKey, async (req, res) => {
       data: {
         name: 'Dave Test',
         phone,
-        email: 'askdave755@gmail.com',
+        email: OWNER_EMAIL,
         company: 'Test Trucking Co',
         state: 'MI',
         source: 'manual_test',
