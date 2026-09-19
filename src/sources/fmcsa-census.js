@@ -1,36 +1,38 @@
 /**
  * src/sources/fmcsa-census.js — FMCSA Company Census lead source (FREE).
  *
- * Pulls Michigan trucking companies from the FMCSA census via Socrata
+ * Pulls trucking companies from the FMCSA census via Socrata
  * (dataset az4n-8mr2, data.transportation.gov). Zero Apollo credits.
  *
- * Filters (all applied in JS — see DEPLOYMENT NOTES):
- *   - status_code = A (active)          [server-side param]
- *   - phy_state   = MI                  [server-side param]
- *   - classdef    = A or C              [JS]
- *   - power_units = 3..50               [JS — column is TEXT in this dataset]
- *   - must have a dialable phone        [JS]
+ * Field realities of az4n-8mr2 (verified against the live dataset + FMCSA
+ * documentation — DO NOT regress these):
+ *   - dot_number          Number type
+ *   - add_date            TEXT, format YYYYMMDD (eight chars) — NOT ISO 8601.
+ *                         Lexicographic sort = chronological sort, so
+ *                         $order 'add_date DESC' is valid on the text column.
+ *   - power_units/truck_units  TEXT — parse digits client-side; never use
+ *                         server-side BETWEEN (query.soql.type-mismatch).
+ *   - classdef            TEXT — codes ('A' = authorized for hire,
+ *                         'C' = private property) OR full descriptions
+ *                         ('AUTHORIZED FOR HIRE', 'PRIVATE PROPERTY').
+ *                         Accept both.
+ *   - phone/cell_phone/email_address  TEXT; ~96% / 43% / 65% filled.
+ *   - status_code         'A' = active (NOT proof of operating authority).
  *
- * Dedupe: dot_number first, then phone (against existing leads, any vertical).
- * Scoring: authority age from add_date — <=90 days = 'hot' band, sorted
- *          newest-authority-first so fresh carriers get dialed first.
- * Cap: FMCSA_DAILY_CAP env (default 60) leads queued per day.
- * Cron: 06:15 UTC daily + one boot run 60s after startup (mirrors life-feeder).
+ * API realities (verified the hard way):
+ *   - Anonymous requests capped at 1,000 rows -> SOCRATA_APP_TOKEN required
+ *     (Railway env, sent as X-App-Token header; free from
+ *     data.transportation.gov -> Profile -> Developer Settings).
+ *   - $app_token URL param is REJECTED on this platform ("Unrecognized
+ *     arguments") — header only.
+ *   - Column filters as plain params (?phy_state=MI) — avoid $where with
+ *     quotes (mobile paste mangling produced 0-row results).
  *
- * DEPLOYMENT NOTES (hard-won, do not regress):
- *   - power_units is TEXT-typed in az4n-8mr2 — NO server-side BETWEEN/$where
- *     on it (Socrata type-mismatch error). All fleet filtering happens in JS.
- *   - Column filters are PLAIN PARAMS (?phy_state=MI&status_code=A), not $where —
- *     quote-mangling on mobile produced 0-row results with $where.
- *   - SOCRATA_APP_TOKEN (Railway env) is REQUIRED. Anonymous requests are
- *     silently capped at 1,000 rows; the pager would misread that as
- *     end-of-dataset. Token raises the cap to 50,000/request and is sent as
- *     the X-App-Token header. Free: data.transportation.gov → Profile →
- *     Developer Settings → Create App Token.
+ * Lane: FMCSA_VERTICAL env decides — 'commercial_auto' (default, commercial
+ * auto insurance lane) or 'life_fe' (owner-operator life/FE lane). Affects
+ * which feeder cap and call flow the leads compete under.
  *
- * Leads land as: vertical='life_fe' (owner-operator life/FE lane), source=
- * 'fmcsa_census', status='pending', then drip-queued to the call worker at
- * 12s spacing — the Redis concurrency semaphore is the real throttle.
+ * Cron: 06:15 UTC daily + boot run 60s after startup (mirrors life-feeder).
  */
 const cron = require('node-cron');
 const axios = require('axios');
@@ -39,10 +41,12 @@ const { callQueue } = require('../queue');
 
 const SOCRATA_BASE = 'https://data.transportation.gov/resource/az4n-8mr2.json';
 const APP_TOKEN = process.env.SOCRATA_APP_TOKEN;
-const PAGE_SIZE = 50000;             // max per request WITH app token
-const DAILY_CAP = parseInt(process.env.FMCSA_DAILY_CAP || '60', 10);
-const HOT_DAYS = 90;                 // authority <= 90 days old = hot band
-const STATE = process.env.FMCSA_STATE || 'MI';
+const PAGE_SIZE = 50000;                       // max per request WITH app token
+const DAILY_CAP = parseInt(process.env.FMCSA_CENSUS_DAILY_CAP || process.env.FMCSA_DAILY_CAP || '60', 10);
+const HOT_DAYS = parseInt(process.env.FMCSA_CENSUS_HOT_DAYS || '90', 10);
+const STATE = (process.env.FMCSA_CENSUS_STATES || process.env.FMCSA_STATE || 'MI').split(',')[0].trim().toUpperCase();
+const VERTICAL = process.env.FMCSA_VERTICAL || 'commercial_auto';
+const INSURANCE_TYPE = VERTICAL === 'life_fe' ? 'life' : 'commercial_auto';
 
 function normalizePhoneE164(raw) {
   if (!raw) return null;
@@ -51,15 +55,36 @@ function normalizePhoneE164(raw) {
   return d.length === 11 && d.startsWith('1') ? '+' + d : null;
 }
 
-// power_units is TEXT — parse defensively ('3', '003', '3.0' all seen).
-function fleetSize(raw) {
-  const n = parseInt(String(raw || '').replace(/\D/g, ''), 10);
-  return Number.isFinite(n) ? n : 0;
+// power_units is TEXT — parse digits defensively; fall back to truck_units.
+function fleetSize(r) {
+  const primary = parseInt(String(r.power_units ?? '').replace(/\D/g, ''), 10);
+  if (Number.isFinite(primary) && primary > 0) return primary;
+  const fallback = parseInt(String(r.truck_units ?? '').replace(/\D/g, ''), 10);
+  return Number.isFinite(fallback) ? fallback : 0;
 }
 
+// Accept classdef as single-letter code OR full description.
+// A / AUTHORIZED FOR HIRE -> true
+// C / PRIVATE PROPERTY    -> true (private carriers still need commercial auto)
+// Passenger, migrant, mail, government -> false.
+function classOk(rawCls) {
+  const c = String(rawCls || '').trim().toUpperCase();
+  if (!c) return false;
+  if (c === 'A' || c === 'C') return true;
+  if (c.includes('AUTHORIZED FOR HIRE')) return true;
+  if (c.includes('PRIVATE') && !c.includes('PASSENGER')) return true;
+  return false;
+}
+
+// add_date is TEXT 'YYYYMMDD' (verified). Fall back to generic Date parse.
 function authorityAgeDays(addDate) {
-  if (!addDate) return null;
-  const t = new Date(addDate).getTime();
+  const s = String(addDate || '').trim();
+  let t = NaN;
+  if (/^\d{8}$/.test(s)) {
+    t = new Date(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8)).getTime();
+  } else {
+    t = new Date(s).getTime();
+  }
   if (!Number.isFinite(t)) return null;
   return Math.floor((Date.now() - t) / 86400000);
 }
@@ -71,21 +96,22 @@ async function fetchPage(offset) {
       status_code: 'A',
       $limit: PAGE_SIZE,
       $offset: offset,
-      $order: 'dot_number',
+      $order: 'add_date DESC',   // YYYYMMDD text sorts chronologically
     },
     headers: APP_TOKEN ? { 'X-App-Token': APP_TOKEN } : {},
-    timeout: 120000,
+    timeout: 180000,
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
   });
   return Array.isArray(resp.data) ? resp.data : [];
 }
 
 async function ingestCensus() {
   if (!APP_TOKEN) {
-    console.warn('🚛 FMCSA census: SOCRATA_APP_TOKEN not set — skipping (anonymous cap would truncate results)');
+    console.warn('🚛 FMCSA census: SOCRATA_APP_TOKEN not set — skipping (1,000-row anon cap would truncate)');
     return { skipped: 'no_token' };
   }
 
-  // Daily cap: count census leads created today
   const todayCount = await prisma.lead.count({
     where: { source: 'fmcsa_census', createdAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) } },
   });
@@ -95,86 +121,102 @@ async function ingestCensus() {
   }
   const remaining = DAILY_CAP - todayCount;
 
-  console.log(`🚛 FMCSA census: pulling ${STATE} actives, 3-50 units...`);
+  console.log(`🚛 FMCSA census: pulling ${STATE} actives -> lane=${VERTICAL}, cap ${remaining} more today`);
 
-  // Page the whole state slice, filter in JS, collect candidates.
+  // Preload existing DOTs + active phones once (in-memory dedupe, cheap).
+  const [dotRows, phoneRows] = await Promise.all([
+    prisma.lead.findMany({ where: { dotNumber: { not: null } }, select: { dotNumber: true } }),
+    prisma.lead.findMany({
+      where: { phone: { not: null }, status: { notIn: ['closed', 'compliance_hold'] } },
+      select: { phone: true },
+    }),
+  ]);
+  const dotSet = new Set(dotRows.map(r => r.dotNumber));
+  const phoneSet = new Set(phoneRows.map(r => r.phone));
+
+  const reject = { class: 0, units: 0, phone: 0, dot: 0, dupe: 0 };
+  let sampleLogged = 0;
+
   const candidates = [];
-  const seen = new Set();
   let offset = 0, pages = 0, rawTotal = 0;
   for (;;) {
     const rows = await fetchPage(offset);
     pages++;
     rawTotal += rows.length;
+
     for (const r of rows) {
-      const cls = String(r.classdef || '').trim().toUpperCase();
-      if (cls !== 'A' && cls !== 'C') continue;
-      const units = fleetSize(r.power_units);
-      if (units < 3 || units > 50) continue;
-      const phone = normalizePhoneE164(r.telephone || r.phone);
-      if (!phone) continue;
-      const dot = String(r.dot_number || '').trim();
-      if (!dot) continue;
-      const key = dot + '|' + phone;
-      if (seen.has(key)) continue;
-      seen.add(key);
+      // One-time sample dump so future field drift is diagnosable from logs.
+      if (sampleLogged < 1) {
+        sampleLogged++;
+        console.log('🚛 SAMPLE ROW:', JSON.stringify(r).slice(0, 700));
+      }
+      if (!classOk(r.classdef)) { reject.class++; continue; }
+      const units = fleetSize(r);
+      if (units < 3 || units > 50) { reject.units++; continue; }
+      const phone = normalizePhoneE164(r.cell_phone || r.phone);
+      if (!phone) { reject.phone++; continue; }
+      const dot = String(r.dot_number ?? '').trim();
+      if (!dot) { reject.dot++; continue; }
+      if (dotSet.has(dot)) { reject.dupe++; continue; }
+      if (phoneSet.has(phone)) { reject.dupe++; continue; }
       candidates.push({
-        dot,
-        phone,
-        name: (r.legal_name || r.dba_name || 'Carrier').trim(),
-        dba: (r.dba_name || '').trim() || null,
+        dot, phone, units,
+        name: (r.company_officer_1 || '').trim() || (r.legal_name || 'Carrier').trim(),
+        company: (r.dba_name || '').trim() || (r.legal_name || '').trim(),
+        email: (r.email_address || '').trim().toLowerCase() || null,
         city: (r.phy_city || '').trim() || null,
-        state: (r.phy_state || STATE).trim(),
         zip: (r.phy_zip || '').trim() || null,
-        units,
-        classdef: cls,
+        drivers: parseInt(String(r.total_drivers ?? '').replace(/\D/g, ''), 10) || null,
+        mc: r.docket1 ? `${(r.docket1prefix || 'MC')}${String(r.docket1).replace(/\D/g, '')}` : null,
         ageDays: authorityAgeDays(r.add_date),
       });
     }
-    if (rows.length < PAGE_SIZE) break;  // short page = end of dataset
+
+    if (rows.length < PAGE_SIZE) break;   // short page = end of dataset
     offset += PAGE_SIZE;
   }
+
+  console.log(`🚛 FILTER REJECTS: ${JSON.stringify(reject)} of ${rawTotal} raw`);
 
   // Newest authority first (hot band leads the dial order); unknown age last.
   candidates.sort((a, b) => (a.ageDays ?? 1e9) - (b.ageDays ?? 1e9));
 
-  let imported = 0, dupes = 0, errors = 0;
+  let imported = 0, errors = 0;
   const freshIds = [];
   for (const c of candidates) {
     if (imported >= remaining) break;
+    const hot = c.ageDays !== null && c.ageDays <= HOT_DAYS;
     try {
-      // Dedupe vs DB: DOT number first (unique carrier identity), then phone
-      // across all verticals (skip closed/compliance_hold).
-      const dotDup = await prisma.lead.findFirst({ where: { dotNumber: c.dot } }).catch(() => null);
-      if (dotDup) { dupes++; continue; }
-      const phoneDup = await prisma.lead.findFirst({
-        where: { phone: c.phone, status: { notIn: ['closed', 'compliance_hold'] } },
-      });
-      if (phoneDup) { dupes++; continue; }
-
-      const hot = c.ageDays !== null && c.ageDays <= HOT_DAYS;
       const lead = await prisma.lead.create({
         data: {
           name: c.name,
-          company: c.dba || c.name,
+          company: c.company,
           phone: c.phone,
+          email: c.email,
           city: c.city,
-          state: c.state,
+          state: STATE,
           industry: 'trucking',
           occupation: 'trucking company',
           occupationPlural: 'trucking companies',
-          insuranceType: 'life',
-          vertical: 'life_fe',
+          insuranceType: INSURANCE_TYPE,
+          vertical: VERTICAL,
           source: 'fmcsa_census',
           status: 'pending',
           dotNumber: c.dot,
+          mcNumber: c.mc,
           vehicleCount: c.units,
+          driverCount: c.drivers,
           authorityStatus: hot ? 'new_authority_hot' : 'active',
           scoreBand: hot ? 'hot' : 'standard',
-          complianceNotes: `FMCSA census: DOT ${c.dot}, class ${c.classdef}, ${c.units} units` +
-                 (c.ageDays !== null ? `, authority ${c.ageDays}d old` : '') +
-                 (hot ? ' [HOT: new authority]' : ''),
+          opportunityScore: hot ? 90 : (c.units >= 5 && c.units <= 25 ? 65 : 55),
+          complianceNotes: `FMCSA census: DOT ${c.dot}${c.mc ? ' / MC ' + c.mc : ''}, ${c.units} units` +
+            (c.drivers ? `, ${c.drivers} drivers` : '') +
+            (c.ageDays !== null ? `, authority ${c.ageDays}d old` : '') +
+            (hot ? ' [HOT: new authority]' : ''),
         },
       });
+      dotSet.add(c.dot);
+      phoneSet.add(c.phone);
       freshIds.push(lead.id);
       imported++;
     } catch (e) {
@@ -184,23 +226,21 @@ async function ingestCensus() {
   }
 
   const hotCount = candidates.filter(c => c.ageDays !== null && c.ageDays <= HOT_DAYS).length;
-  console.log(`🚛 FMCSA census ${STATE} @0: +${imported} leads (band: hot=${Math.min(hotCount, imported)} of ${hotCount} hot in dataset... newest authority first) ` +
-    `[raw=${rawTotal} pages=${pages} filtered=${candidates.length} dupes=${dupes} errors=${errors}]`);
+  console.log(`🚛 FMCSA census ${STATE}: +${imported} leads (${Math.min(hotCount, imported)} hot queued of ${hotCount} hot in state) [raw=${rawTotal} pages=${pages} passed=${candidates.length} err=${errors}]`);
 
-  // Drip-queue for calling: 12s spacing, Redis semaphore is the real throttle.
   for (let i = 0; i < freshIds.length; i++) {
     await callQueue.add('make-call', { leadId: freshIds[i] },
-      { delay: 5000 + i * 12000, priority: 5, jobId: 'fmcsa-' + freshIds[i] });
+      { delay: 5000 + i * 12000, priority: 4, jobId: 'fmcsa-' + freshIds[i] });
   }
   if (freshIds.length) console.log(`🚛 FMCSA census: queued ${freshIds.length} for calling`);
 
-  return { imported, dupes, errors, queued: freshIds.length, rawTotal };
+  return { imported, errors, queued: freshIds.length, rawTotal };
 }
 
-// 06:15 UTC daily + first run 60s after boot (mirrors life-feeder pattern).
-if (process.env.FMCSA_FEED_ENABLE !== '0') {
+// 06:15 UTC daily + boot run 60s after startup (mirrors life-feeder).
+if (process.env.FMCSA_CENSUS_ENABLE !== '0' && process.env.FMCSA_FEED_ENABLE !== '0') {
   cron.schedule('15 6 * * *', () => ingestCensus().catch(e => console.error('🚛 FMCSA census cron:', e.message)));
-  setTimeout(() => ingestCensus().catch(e => console.error('FMCSA census boot run:', e.message)), 60000);
+  setTimeout(() => ingestCensus().catch(e => console.error('🚛 FMCSA census boot run:', e.message)), 60000);
 }
 
 module.exports = { ingestCensus };
