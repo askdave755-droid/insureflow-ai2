@@ -12,6 +12,7 @@ const { attachAnnuityRoutes } = require('./routes-annuity');
 
 require('./orchestrator');
 require('./life-feeder');   // automated HasData life/FE lead generation
+require('./sources/fmcsa-census');  // free FMCSA census trucking leads
 require('./workers/callWorker');
 require('./lib/sequences');   // registers the sequence-step Bull worker
 
