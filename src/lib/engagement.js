@@ -16,7 +16,7 @@
  *       Brady (make-call). This is a WARM call — the lead engaged first.
  *
  * Env:
- *   DAVE_ALERT_EMAIL     where hot-lead alerts go (default askdave755@gmail.com)
+ *   OWNER_EMAIL          where hot-lead alerts go (default nexusgpartners@gmail.com; legacy DAVE_ALERT_EMAIL still honored)
  *   BREVO_WEBHOOK_SECRET if set, /webhook/brevo requires ?secret= match
  *   APOLLO_WEBHOOK_SECRET if set, phone-reveal webhook requires ?secret= match
  *   BASE_URL             required for the Apollo reveal webhook callback
@@ -33,8 +33,9 @@ const { formatPhoneE164 } = require('./validate');
 
 const OPEN_ESCALATION_THRESHOLD = 3;
 
+// Owner notifications inbox — OWNER_EMAIL wins, legacy DAVE_ALERT_EMAIL still honored.
 function alertEmail() {
-  return process.env.DAVE_ALERT_EMAIL || 'askdave755@gmail.com';
+  return process.env.OWNER_EMAIL || process.env.DAVE_ALERT_EMAIL || 'nexusgpartners@gmail.com';
 }
 
 // ── engagement table (lazy raw SQL — same pattern as sequence_enrollments) ──
@@ -51,236 +52,127 @@ function ensureTable() {
        )`, [])
       .then(() => pool.query(
         `CREATE INDEX IF NOT EXISTS idx_engagement_lead ON lead_engagement(lead_id)`, []))
-      .catch(e => { tableReady = null; console.error('lead_engagement init failed:', e.message); throw e; });
+      .catch(e => { tableReady = null; console.error('lead_engagement table:', e.message); throw e; });
   }
   return tableReady;
 }
 
-async function recordEvent(leadId, event, meta = {}) {
+async function logEvent(leadId, event, meta = {}) {
   await ensureTable();
   await pool.query(
-    `INSERT INTO lead_engagement (lead_id, event, meta) VALUES ($1, $2, $3::jsonb)`,
+    `INSERT INTO lead_engagement (lead_id, event, meta) VALUES ($1, $2, $3)`,
     [leadId, event, JSON.stringify(meta)]);
 }
 
-async function eventCounts(leadId) {
-  await ensureTable();
-  const r = await pool.query(
-    `SELECT event, COUNT(*)::int AS n FROM lead_engagement WHERE lead_id=$1 GROUP BY event`,
-    [leadId]);
-  return Object.fromEntries(r.rows.map(row => [row.event, row.n]));
+// Brevo webhook payload shapes vary; normalize what we care about.
+function parseBrevoEvent(body) {
+  const event = String(body.event || '').toLowerCase();   // opened / click / unsubscribed / spam / hard_bounce ...
+  const email = (body.email || '').toLowerCase().trim();
+  return { event, email, raw: body };
 }
 
-async function findLeadByEmail(email) {
-  if (!email) return null;
-  return prisma.lead.findFirst({
-    where: { email: { equals: email, mode: 'insensitive' } },
+async function handleBrevoEvent(body) {
+  const { event, email } = parseBrevoEvent(body);
+  if (!email) return { ignored: true, reason: 'no email' };
+
+  const lead = await prisma.lead.findFirst({
+    where: { email },
     orderBy: { createdAt: 'desc' }
   });
-}
+  if (!lead) return { ignored: true, reason: 'unknown email' };
 
-// ── Apollo phone reveal ──
-// POST /people/match with reveal_phone_number. Apollo delivers the number
-// asynchronously to webhook_url (BASE_URL/webhook/apollo/phones). If it
-// answers synchronously, we use that immediately.
-async function revealPhone(lead) {
-  const config = require('../config');
-  if (!config.APOLLO_API_KEY) return { attempted: false, reason: 'no apollo key' };
-  if (!config.BASE_URL) return { attempted: false, reason: 'BASE_URL not set — Apollo reveal needs a webhook callback' };
+  await logEvent(lead.id, event, body);
 
-  const parts = (lead.name || '').trim().split(/\s+/);
-  try {
-    const res = await axios.post(
-      'https://api.apollo.io/api/v1/people/match',
-      {
-        first_name: parts[0],
-        last_name: parts.slice(1).join(' ') || undefined,
-        organization_name: lead.company || undefined,
-        email: lead.email || undefined,
-        reveal_phone_number: true,
-        webhook_url: `${config.BASE_URL}/webhook/apollo/phones?leadId=${lead.id}`
-      },
-      {
-        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache', 'X-Api-Key': config.APOLLO_API_KEY },
-        timeout: 20000
-      });
-
-    const phones = res.data?.person?.phone_numbers || res.data?.phone_numbers || [];
-    const sync = phones.map(pn => pn.sanitized_number || pn.raw_number).find(Boolean);
-    console.log(`📞 Phone reveal requested for ${lead.name} (${lead.id}) — ${sync ? 'returned synchronously' : 'async via webhook'}`);
-    return { attempted: true, syncPhone: sync || null };
-  } catch (err) {
-    console.error(`⚠️ Phone reveal failed for lead ${lead.id}:`, err.response?.status, JSON.stringify(err.response?.data || err.message));
-    return { attempted: true, error: err.message };
+  // Hard stops first
+  if (event.includes('unsubscribe') || event.includes('spam')) {
+    await addToDnc({ phone: lead.phone, email }, 'brevo_webhook');
+    await prisma.lead.update({ where: { id: lead.id }, data: {
+      status: 'compliance_hold', complianceStatus: 'blocked',
+      complianceNotes: `Brevo ${event} — self opt-out`
+    }});
+    return { leadId: lead.id, action: 'dnc' };
   }
-}
-
-// Queue Brady for a warm follow-up call — DNC re-check first, always.
-async function queueBradyCall(lead, reason) {
-  const dnc = await prisma.dncEntry.findFirst({
-    where: { OR: [{ phone: lead.phone }, ...(lead.email ? [{ email: lead.email }] : [])] }
-  });
-  if (dnc) {
-    console.log(`🚫 Warm-call blocked by DNC: ${lead.name} (${lead.id})`);
-    return { queued: false, reason: 'dnc' };
+  if (event.includes('hard_bounce')) {
+    await prisma.lead.update({ where: { id: lead.id }, data: {
+      complianceNotes: 'Email hard-bounced — address dead'
+    }});
+    return { leadId: lead.id, action: 'bounced' };
   }
-  await callQueue.add('make-call', { leadId: lead.id }, { delay: 60000, priority: 1 });
-  console.log(`🔥 Brady queued for warm call: ${lead.name} (${lead.id}) — ${reason}`);
-  return { queued: true };
-}
 
-// ── escalation: engaged lead → task + Dave alert + phone reveal ──
-async function escalate(lead, eventName, meta) {
-  const counts = await eventCounts(lead.id);
-  if (counts.escalated) return { skipped: 'already_escalated' };
-  await recordEvent(lead.id, 'escalated', { trigger: eventName });
+  // Escalation: click, or 3rd open
+  let opens = 0;
+  if (event === 'opened' || event === 'open') {
+    const r = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM lead_engagement WHERE lead_id=$1 AND event IN ('opened','open')`,
+      [lead.id]);
+    opens = r.rows[0]?.n || 0;
+  }
+  const hot = event === 'click' || opens >= OPEN_ESCALATION_THRESHOLD;
+  if (!hot) return { leadId: lead.id, action: 'logged' };
 
-  await prisma.lead.update({ where: { id: lead.id }, data: { status: 'engaged' } });
-
-  const label = `${lead.name} @ ${lead.company || 'unknown co'}`;
+  // HOT: task + Dave alert + Apollo phone reveal (async webhook returns number)
   await createTask({
     leadId: lead.id,
     type: 'FOLLOW_UP',
-    title: `🔥 Engaged lead: ${label} ${eventName === 'click' ? 'clicked your link' : `opened ${counts.opened || 1}x`} — follow up today`,
-    notes: `Email: ${lead.email} | Phone: ${lead.phone || 'not yet — reveal requested'} | Event: ${eventName}${meta?.link ? ` | Link: ${meta.link}` : ''}`,
-    dueAt: new Date(Date.now() + 3600000),
-    priority: 'hot'
+    title: `🔥 ${lead.name || lead.company || email} ${event === 'click' ? 'CLICKED the link' : `opened ${opens}x`} — call now`,
+    priority: 'hot',
+    dueAt: new Date()
   });
+  await brevoEmail(alertEmail(),
+    `🔥 HOT: ${lead.company || lead.name || email} engaged`,
+    `<p><b>${lead.name || ''}</b> (${lead.company || 'no company'}) just <b>${event}</b>.</p>` +
+    `<p>Email: ${email}<br>Phone on file: ${lead.phone || 'none — requesting Apollo reveal'}</p>` +
+    `<p>Call now while it's fresh.</p>`);
 
-  await brevoEmail(
-    alertEmail(),
-    `🔥 Hot lead: ${label} just engaged`,
-    `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
-       <div style="background:#1e3a5f;padding:16px 20px;"><b style="color:#fff;">David Hughes Insurance — Hot Lead</b></div>
-       <div style="padding:20px;">
-         <p><b>${label}</b> just <b>${eventName === 'click' ? 'clicked your booking link' : 'opened your email ' + (counts.opened || 1) + ' times'}</b>.</p>
-         <p>Email: ${lead.email}<br>Phone: ${lead.phone || 'reveal requested — Brady will call when it lands'}<br>State: ${lead.state || '?'}${meta?.link ? `<br>Clicked: ${meta.link}` : ''}</p>
-         <p>Open the dashboard for details. A phone reveal has been requested automatically.</p>
-       </div>
-     </div>`);
-
-  // If a phone already exists (rare for Apollo email-only leads), call now.
-  if (lead.phone) {
-    await queueBradyCall(lead, `engaged:${eventName}`);
-    return { escalated: true, phone: 'existing', brady: 'queued' };
-  }
-
-  const reveal = await revealPhone(lead);
-  if (reveal.syncPhone) {
-    const phone = formatPhoneE164(reveal.syncPhone);
-    if (phone) {
-      await prisma.lead.update({ where: { id: lead.id }, data: { phone } });
-      await queueBradyCall({ ...lead, phone }, 'engaged:sync_reveal');
-      return { escalated: true, phone: 'revealed_sync', brady: 'queued' };
+  if (!lead.phone && process.env.APOLLO_API_KEY) {
+    try {
+      const resp = await axios.post(
+        'https://api.apollo.io/api/v1/mixed_people/search',
+        { q_organization_name: lead.company, contact_email: email,
+          webhook_url: `${process.env.BASE_URL}/webhook/apollo/phones`, per_page: 1 },
+        { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache', 'x-api-key': process.env.APOLLO_API_KEY } });
+      console.log('Apollo phone reveal requested for', email, resp.status);
+    } catch (e) {
+      console.warn('Apollo reveal request failed:', e.message);
     }
   }
-  return { escalated: true, phone: reveal.attempted ? 'reveal_pending' : 'reveal_failed', brady: 'waiting_on_phone' };
+  return { leadId: lead.id, action: 'escalated', event, opens };
 }
 
-// ── Brevo transactional webhook ──
-// Events: delivered, opened, unique_opened, click, hard_bounce, soft_bounce,
-// unsubscribe, spam, invalid_email. Body: { event, email, link?, subject, ... }
-async function handleBrevoEvent(body) {
-  const event = String(body?.event || '').toLowerCase();
-  const email = body?.email;
-  if (!event || !email) return { processed: false, reason: 'missing event/email' };
+// Apollo delivers phone numbers here (async webhook from reveal request).
+async function handleApolloPhoneWebhook(body) {
+  const person = body.person || body.people?.[0] || body;
+  const email = (person.email || '').toLowerCase().trim();
+  const nums = person.phone_numbers || [];
+  const rawNum = nums[0]?.sanitized_number || nums[0]?.raw_number || person.phone_number;
+  const phone = rawNum ? formatPhoneE164(rawNum) : null;
+  if (!email || !phone) return { ignored: true, reason: 'no email or phone in payload' };
 
-  const lead = await findLeadByEmail(email);
-  if (!lead) {
-    console.log(`📭 Brevo ${event} for unknown email ${email}`);
-    return { processed: false, reason: 'unknown_email', event };
+  const lead = await prisma.lead.findFirst({ where: { email }, orderBy: { createdAt: 'desc' } });
+  if (!lead) return { ignored: true, reason: 'unknown email' };
+
+  await prisma.lead.update({ where: { id: lead.id }, data: { phone } });
+  await logEvent(lead.id, 'phone_revealed', { phone });
+
+  // DNC re-check before dialing the fresh number
+  const dnc = await prisma.dncEntry.findFirst({ where: { phone } });
+  if (dnc) {
+    await prisma.lead.update({ where: { id: lead.id }, data: { status: 'compliance_hold', complianceStatus: 'blocked', complianceNotes: 'Revealed phone on DNC' } });
+    return { leadId: lead.id, action: 'dnc_block' };
   }
 
-  const meta = { link: body.link, subject: body.subject, ts: body.ts_epoch || body.ts };
-  await recordEvent(lead.id, event, meta);
-
-  switch (event) {
-    case 'unsubscribe':
-    case 'spam': {
-      await addToDnc({ phone: lead.phone || null, email: lead.email, reason: `Brevo ${event} event`, source: 'brevo_webhook' }, 'webhook:brevo');
-      try {
-        const { stopEnrollment } = require('./sequences');
-        await stopEnrollment(lead.id, `brevo_${event}`);
-      } catch (e) { console.warn('stopEnrollment failed:', e.message); }
-      await prisma.lead.update({ where: { id: lead.id }, data: { status: 'compliance_hold', complianceStatus: 'blocked', complianceNotes: `DNC — Brevo ${event}` } });
-      console.log(`🚫 ${event} from ${email} — DNC + sequence stopped`);
-      return { processed: true, event, action: 'dnc' };
-    }
-
-    case 'hard_bounce':
-    case 'invalid_email': {
-      try {
-        const { stopEnrollment } = require('./sequences');
-        await stopEnrollment(lead.id, 'email_bounced');
-      } catch (e) { console.warn('stopEnrollment failed:', e.message); }
-      await prisma.lead.update({ where: { id: lead.id }, data: { status: 'bounced' } });
-      return { processed: true, event, action: 'bounced' };
-    }
-
-    case 'click': {
-      const r = await escalate(lead, 'click', meta);
-      return { processed: true, event, action: 'escalated', ...r };
-    }
-
-    case 'opened':
-    case 'unique_opened': {
-      const counts = await eventCounts(lead.id);
-      const opens = (counts.opened || 0) + (counts.unique_opened || 0);
-      if (opens >= OPEN_ESCALATION_THRESHOLD && !counts.escalated) {
-        const r = await escalate(lead, 'opened', meta);
-        return { processed: true, event, opens, action: 'escalated', ...r };
-      }
-      return { processed: true, event, opens, action: 'logged' };
-    }
-
-    default:
-      return { processed: true, event, action: 'logged' };
-  }
+  // Warm call — they engaged first, so dial promptly (business-hours gate lives in the worker)
+  await callQueue.add('make-call', { leadId: lead.id }, { delay: 30000, priority: 1 });
+  return { leadId: lead.id, action: 'queued', phone };
 }
 
-// ── Apollo phone-reveal callback ──
-// Apollo POSTs the revealed phone to the webhook_url we passed. We include
-// ?leadId= in that URL so matching is exact; fall back to email/name+company.
-async function handleApolloPhoneWebhook(body, leadIdFromQuery) {
-  const person = body?.person || body || {};
-  const phones = body?.phone_numbers || person.phone_numbers || [];
-  const rawPhone = phones.map(pn => pn.sanitized_number || pn.raw_number).find(Boolean);
-  const phone = formatPhoneE164(rawPhone);
-  if (!phone) {
-    console.warn('⚠️ Apollo phone webhook with no usable number:', JSON.stringify(body).slice(0, 300));
-    return { processed: false, reason: 'no_phone_in_payload' };
-  }
-
-  let lead = leadIdFromQuery
-    ? await prisma.lead.findUnique({ where: { id: leadIdFromQuery } })
-    : await findLeadByEmail(person.email);
-  if (!lead) {
-    console.warn('⚠️ Apollo phone webhook: no matching lead', leadIdFromQuery, person.email);
-    return { processed: false, reason: 'lead_not_found' };
-  }
-
-  await prisma.lead.update({ where: { id: lead.id }, data: { phone, status: lead.status === 'engaged' ? 'engaged' : lead.status } });
-  await recordEvent(lead.id, 'phone_revealed', { phone: phone.slice(-4).padStart(phone.length, '*') });
-
-  const r = await queueBradyCall({ ...lead, phone }, 'phone_revealed');
-  await brevoEmail(
-    alertEmail(),
-    `📞 Number landed: ${lead.name} @ ${lead.company || 'unknown co'}`,
-    `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
-       <div style="background:#1e3a5f;padding:16px 20px;"><b style="color:#fff;">David Hughes Insurance — Brady Dialing</b></div>
-       <div style="padding:20px;">
-         <p>Apollo revealed a phone number for <b>${lead.name}</b> (${lead.email || 'no email'}).</p>
-         <p>Brady is ${r.queued ? 'queued to call within the next business-hours window' : 'NOT calling (DNC block — check the lead)'}.</p>
-       </div>
-     </div>`);
-  return { processed: true, brady: r.queued ? 'queued' : 'blocked' };
-}
-
-async function recentEngagement(limit = 100) {
+// Used by routes to enrich lead detail views.
+async function recentEngagement(leadId, limit = 10) {
   await ensureTable();
   const r = await pool.query(
-    `SELECT * FROM lead_engagement ORDER BY created_at DESC LIMIT $1`, [limit]);
+    `SELECT event, meta, created_at FROM lead_engagement WHERE lead_id=$1 ORDER BY created_at DESC LIMIT $2`,
+    [leadId, limit]);
   return r.rows;
 }
 
-module.exports = { handleBrevoEvent, handleApolloPhoneWebhook, recordEvent, recentEngagement, revealPhone };
+module.exports = { handleBrevoEvent, handleApolloPhoneWebhook, recentEngagement, logEvent };
