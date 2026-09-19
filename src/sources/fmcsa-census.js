@@ -127,7 +127,7 @@ async function ingestCensus() {
   const [dotRows, phoneRows] = await Promise.all([
     prisma.lead.findMany({ where: { dotNumber: { not: null } }, select: { dotNumber: true } }),
     prisma.lead.findMany({
-      where: { phone: { not: null }, status: { notIn: ['closed', 'compliance_hold'] } },
+      where: { status: { notIn: ['closed', 'compliance_hold'] } },
       select: { phone: true },
     }),
   ]);
