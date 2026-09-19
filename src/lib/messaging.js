@@ -8,7 +8,7 @@
 const axios = require('axios');
 
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
-const EMAIL_FROM = process.env.EMAIL_FROM || 'askdave755@gmail.com';
+const EMAIL_FROM = process.env.EMAIL_FROM || 'noreply@nexusgpartners.net';
 const CALENDLY_LINK = process.env.CALENDLY_LINK;
 const BREVO_SMS_SENDER = process.env.BREVO_SMS_SENDER || '+18665056792';
 
@@ -76,6 +76,10 @@ async function sendEmail(to, subject, html, text) {
 
 // ─── QUALIFICATION FOLLOW-UP ───
 async function sendQualificationFollowUp(lead, carrierNames) {
+  if (!CALENDLY_LINK) {
+    console.error('CALENDLY_LINK env var missing — skipping options email/SMS to avoid broken links');
+    return;
+  }
   const firstName = lead.name?.split(' ')[0] || 'there';
   const company = lead.company || 'your business';
 

@@ -10,6 +10,17 @@
 
 const prisma = require('../db');
 const { callQueue } = require('../queue');
+const { sendEmail } = require('./messaging');
+
+// Owner notifications inbox — env-overridable via OWNER_EMAIL.
+const OWNER_EMAIL = process.env.OWNER_EMAIL || 'nexusgpartners@gmail.com';
+
+// Hottest outcomes — straight to the owner's inbox. Fire-and-forget: alert
+// failure must never break the outcome pipeline.
+async function ownerAlert(subject, body) {
+  try { await sendEmail(OWNER_EMAIL, subject, body); }
+  catch (e) { console.warn(`⚠️ ownerAlert failed (${subject}): ${e.message}`); }
+}
 const { getNextBusinessTime } = require('./validate');
 const { handleQualifiedLead } = require('./messaging');
 const { addToDnc } = require('./compliance');
@@ -101,6 +112,10 @@ async function handleCallOutcome(lead, analysis, actor = 'system') {
         dueAt: retryAt,
         priority: lead.scoreBand === 'HOT' ? 'hot' : 'normal'
       });
+      await ownerAlert(
+        `CALLBACK: ${lead.name} (${lead.company || 'unknown co'})`,
+        `${lead.name} asked for a callback on commercial auto.\nPhone: ${lead.phone}\nWhen: ${retryAt.toISOString()}\nNotes: asked Brady to call back during the AI call`
+      );
       break;
     }
 
@@ -168,6 +183,10 @@ async function handleCallOutcome(lead, analysis, actor = 'system') {
         dueAt: new Date(Date.now() + 3600000),
         priority: 'hot'
       });
+      await ownerAlert(
+        `CONVERTED: ${lead.name} (${lead.company || 'unknown co'})`,
+        `${lead.name} qualified on commercial auto (disposition: ${disposition}).\nPhone: ${lead.phone}\nNotes: qualified on the AI call — opportunity created, confirm booking / prep comparison`
+      );
     } catch (err) {
       console.error(`❌ Conversion failed for ${label}: ${err.message}`);
     }
