@@ -8,6 +8,36 @@ const { handleLifeCallDone } = require('../lib/lifePipeline');
 const { handleCallOutcome, createTask } = require('../lib/followup');
 const { canDial, markDialing, markEnded } = require('../lib/callSemaphore');
 
+// ─── PATCH 2: dial cap enforced AT DIAL TIME (not just at the feeder) ───
+const { DateTime } = require('luxon');
+const DAILY_CAP = parseInt(process.env.DAILY_CAP || '45', 10);
+const CALLBACK_CONCURRENCY = 1;
+const CALLBACK_ACTIVE_KEY = 'vapi:active_callbacks';
+const redis = require('../lib/redis');
+
+// Today's dials for a vertical (ET day boundary, matches the feeder's intent)
+async function dialsTodayForVertical(vertical) {
+  const startOfDay = DateTime.now().setZone('America/New_York').startOf('day').toJSDate();
+  return prisma.callLog.count({
+    where: { createdAt: { gte: startOfDay }, lead: { vertical } }
+  });
+}
+
+// ms until 07:00 tomorrow ET (business-hours gate takes over from there)
+function msUntilTomorrow7amET() {
+  const t = DateTime.now().setZone('America/New_York').plus({ days: 1 })
+    .set({ hour: 7, minute: 0, second: 0, millisecond: 0 });
+  return Math.max(t.toMillis() - Date.now(), 60000);
+}
+
+async function activeCallbacks() { return redis.scard(CALLBACK_ACTIVE_KEY); }
+async function markCallbackDialing(callId) {
+  if (!callId) return;
+  await redis.sadd(CALLBACK_ACTIVE_KEY, callId);
+  await redis.expire(CALLBACK_ACTIVE_KEY, 3600);
+}
+async function markCallbackEnded(callId) { if (callId) await redis.srem(CALLBACK_ACTIVE_KEY, callId); }
+
 // ─── PATCH 1: dial dedupe guard ───
 const RECENT_CALL_DAYS = 5;
 const CALLBACK_DISPOSITIONS = new Set(['callback', 'appointment', 'requested_callback']);
@@ -114,6 +144,38 @@ callQueue.process('make-call', 3, async (job) => {
     return { rescheduled: true, nextCall: nextTime };
   }
   
+  // PATCH 2: daily dial cap, checked right before the dial. Callbacks bypass
+  // the cap (max 1 concurrent callback); everything else rolls to tomorrow.
+  const isCallback = job.data.type === 'callback';
+  const vertical = lead.vertical || 'commercial_auto';
+  if (isCallback) {
+    if (!force && (await activeCallbacks()) >= CALLBACK_CONCURRENCY) {
+      await callQueue.add('make-call', { ...job.data }, {
+        delay: 60000 + Math.floor(Math.random() * 30000),
+        priority: 1,
+        jobId: `cbwait-${leadId}-${Date.now()}`
+      });
+      console.log(`⏳ callback slot busy — requeued ${lead.name} in ~60-90s`);
+      return { requeued: 'callback_concurrency' };
+    }
+  } else if (!force) {
+    const dialsToday = await dialsTodayForVertical(vertical);
+    if (dialsToday >= DAILY_CAP) {
+      const delay = msUntilTomorrow7amET();
+      await prisma.lead.update({
+        where: { id: leadId },
+        data: { status: 'scheduled', scheduledCallAt: new Date(Date.now() + delay) }
+      });
+      await callQueue.add('make-call', { ...job.data }, {
+        delay,
+        priority: job.opts?.priority || 5,
+        jobId: `cap-${leadId}-${Date.now()}`
+      });
+      console.log(`⏸️ dial cap hit for ${vertical} (${dialsToday}/${DAILY_CAP}), queue rolls to tomorrow`);
+      return { requeued: 'daily_cap', dialsToday, cap: DAILY_CAP };
+    }
+  }
+
   // Vapi concurrency gate — requeue with jittered backoff instead of slamming
   // the API and burning the daily cap on 'Over Concurrency Limit' rejections.
   // Returns cleanly so Bull does not count this as a failure or a retry attempt.
@@ -161,6 +223,7 @@ callQueue.process('make-call', 3, async (job) => {
   }
 
   await markDialing(result.callId);
+  if (isCallback) await markCallbackDialing(result.callId);
   
   // Save call log
   await prisma.callLog.create({
@@ -209,6 +272,7 @@ async function handleVapiWebhook(webhookData) {
   if (!callId) throw new Error('Missing call ID');
 
   await markEnded(callId); // release concurrency slot
+  await markCallbackEnded(callId).catch(() => {}); // release callback slot (no-op for cold dials)
 
   const transcript = message.artifact?.transcript || message.transcript || '';
   const summary = message.analysis?.summary || message.summary || '';
