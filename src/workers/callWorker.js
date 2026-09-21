@@ -8,6 +8,36 @@ const { handleLifeCallDone } = require('../lib/lifePipeline');
 const { handleCallOutcome, createTask } = require('../lib/followup');
 const { canDial, markDialing, markEnded } = require('../lib/callSemaphore');
 
+// ─── PATCH 1: dial dedupe guard ───
+const RECENT_CALL_DAYS = 5;
+const CALLBACK_DISPOSITIONS = new Set(['callback', 'appointment', 'requested_callback']);
+
+// Remove every other queued/delayed make-call job for this lead (duplicate
+// queue entries were the root of the 3x-in-80-min dials).
+async function removeQueuedCallsForLead(leadId, exceptJobId = null) {
+  let removed = 0;
+  const jobs = await callQueue.getJobs(['delayed', 'waiting', 'paused', 'prioritized']);
+  for (const j of jobs) {
+    if (!j || j.name !== 'make-call' || j.data?.leadId !== leadId) continue;
+    if (exceptJobId && String(j.id) === String(exceptJobId)) continue;
+    try { await j.remove(); removed++; } catch (e) { /* already active/locked */ }
+  }
+  return removed;
+}
+
+// Was this phone dialed (call completed) within the last N days?
+async function recentCompletedCall(phone, days = RECENT_CALL_DAYS) {
+  if (!phone) return null;
+  return prisma.callLog.findFirst({
+    where: {
+      createdAt: { gte: new Date(Date.now() - days * 86400000) },
+      status: { notIn: ['initiated', 'queued', 'ringing', 'in-progress'] },
+      lead: { phone }
+    },
+    orderBy: { createdAt: 'desc' }
+  });
+}
+
 // PATCH-1 helpers: phone fallback + pending report queue
 const pendingReports = new Map(); // callId -> {message, expires}
 const PENDING_TTL_MS = 5 * 60 * 1000;
@@ -46,6 +76,26 @@ callQueue.process('make-call', 3, async (job) => {
   
   const lead = await prisma.lead.findUnique({ where: { id: leadId } });
   if (!lead) throw new Error('Lead not found');
+
+  // PATCH 1: cold queue skips callback_pending leads entirely — the callback
+  // dialer (data.type === 'callback') is the only thing allowed to dial them.
+  if (lead.status === 'callback_pending' && job.data.type !== 'callback' && !force) {
+    await removeQueuedCallsForLead(leadId, job.id);
+    console.log(`⏭️ skip ${lead.name} — callback_pending (cold queue)`);
+    return { skipped: 'callback_pending' };
+  }
+
+  // PATCH 1: dedupe guard — never re-dial a phone completed within 5 days
+  if (!force && job.data.type !== 'callback') {
+    const recent = await recentCompletedCall(lead.phone);
+    if (recent) {
+      const daysAgo = Math.floor((Date.now() - new Date(recent.createdAt).getTime()) / 86400000);
+      await prisma.lead.update({ where: { id: leadId }, data: { status: 'recently_called' } });
+      await removeQueuedCallsForLead(leadId, job.id);
+      console.log(`⏭️ skip ${lead.name} — called ${daysAgo}d ago`);
+      return { skipped: 'recently_called', daysAgo };
+    }
+  }
   
   // Double-check business hours (skipped in force mode)
   if (force) {
@@ -309,6 +359,14 @@ async function handleVapiWebhook(webhookData) {
 
   const outcome = await handleCallOutcome(lead, analysis, 'webhook:vapi');
 
+  // PATCH 1: callback outcomes make the lead ineligible for the cold queue
+  if (CALLBACK_DISPOSITIONS.has(outcome.disposition)) {
+    const removed = await removeQueuedCallsForLead(lead.id);
+    await prisma.lead.update({ where: { id: lead.id }, data: { status: 'callback_pending' } });
+    outcome.updates.status = 'callback_pending';
+    console.log(`📌 ${lead.name} → callback_pending (removed ${removed} queued make-call jobs)`);
+  }
+
   if (outcome.qualified) {
     console.log(`🔥 QUALIFIED (${outcome.disposition}): ${lead.name} (${lead.company})`);
   } else {
@@ -324,4 +382,4 @@ async function handleVapiWebhook(webhookData) {
   };
 }
 
-module.exports = { handleVapiWebhook };
+module.exports = { handleVapiWebhook, removeQueuedCallsForLead };
