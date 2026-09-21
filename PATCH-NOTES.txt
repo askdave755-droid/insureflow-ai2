@@ -129,3 +129,30 @@ COMPLIANCE NOTES
 - Sequence engine re-checks DNC before every touch; STOP kills instantly.
 - SMS steps still require consent per the compliance engine; early drip
   steps are email-only by design.
+
+═══════════════════════════════════════════════════════════════════
+2026-09-21 — DIALER HARDENING + SAM.GOV FEEDER (4 commits)
+═══════════════════════════════════════════════════════════════════
+1. Dial dedupe guard   (callWorker.js) — 5-day recent-call skip ->
+                        status 'recently_called'; callback outcomes ->
+                        'callback_pending' + duplicate make-call jobs purged;
+                        cold queue skips callback_pending leads.
+2. Dial cap at dial time — DAILY_CAP env (default 45) counted from
+                        call_logs per vertical; over cap re-queues to 07:00 ET
+                        tomorrow. Jobs with data.type==='callback' bypass
+                        (1 concurrent, Redis set vapi:active_callbacks).
+3. Callback dialer     — appointment startsAt must be > now+5min else ASAP
+                        (next business window). Dial at startsAt-1min with
+                        {type:'callback'}; Vapi firstMessage override:
+                        "Hi <name>, this is <assistant> from Nexus — you asked
+                        us to call you back about <product>."
+                        VAPI_ASSISTANT_NAME env (default Brady).
+4. SAM.gov feeder      — src/sam-feeder.js, cron 21:00 ET (registered in
+                        life-feeder.js). Lead.uei String? @unique.
+
+DEPLOY CHECKLIST
+1. DB: apply prisma/migrations/20260921000000_add_sam_uei (or
+   `railway run npx prisma db push` — adds leads.uei + unique index only).
+2. Railway env: SAM_API_KEY=<SAM.gov public API key>
+   optional: SAM_DAILY_BUDGET=8, DAILY_CAP=45, VAPI_ASSISTANT_NAME=Brady
+3. System stays PAUSED. Dave calls /admin/resume after log verification.

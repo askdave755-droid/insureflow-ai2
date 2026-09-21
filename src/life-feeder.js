@@ -126,4 +126,12 @@ if (process.env.LIFE_FEED_ENABLE !== '0') {
   setTimeout(feedLife, 30000);
 }
 
+// SAM.gov federal-contractor feeder — once daily 21:00 ET so the queue is
+// warm for the 07:00 window (SAM_FEED_ENABLE='0' disables).
+if (process.env.SAM_FEED_ENABLE !== '0') {
+  const { runSamFeeder } = require('./sam-feeder');
+  cron.schedule('0 21 * * *', () => runSamFeeder().catch(e => console.error('🏛️ SAM feeder failed:', e.message)),
+    { timezone: 'America/New_York' });
+}
+
 module.exports = { feedLife };

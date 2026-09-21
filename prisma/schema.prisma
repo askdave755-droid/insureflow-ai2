@@ -122,6 +122,7 @@ model Lead {
   occupationPlural  String?   @map("occupation_plural") // e.g. "barbershops"
   categories        String?   // comma-joined Maps categories
   placeId           String?   @unique @map("place_id")  // Google place_id — dedupe key
+  uei               String?   @unique                    // SAM.gov Unique Entity ID — dedupe key (sam-feeder)
   vertical          String?   @default("commercial_auto") // life_fe | commercial_auto
 
   // ── Life vertical — Russell fact-find (captured on the call) ──
