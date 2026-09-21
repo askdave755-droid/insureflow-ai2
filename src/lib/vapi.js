@@ -81,10 +81,25 @@ function lifeVariables(lead) {
   };
 }
 
-async function makeCall(lead) {
+// PATCH 3: callback intro — used when the make-call job carries {type:'callback'}
+const ASSISTANT_NAME = process.env.VAPI_ASSISTANT_NAME || 'Brady';
+function callbackIntro(lead, vertical) {
+  const first = (lead.name || 'there').split(' ')[0];
+  const product = vertical === 'life_fe' ? 'life insurance'
+    : (lead.insuranceType || 'commercial auto').replace(/_/g, ' ');
+  return `Hi ${first}, this is ${ASSISTANT_NAME} from Nexus — you asked us to call you back about ${product}.`;
+}
+
+async function makeCall(lead, opts = {}) {
   const vertical = leadVertical(lead);
   const cfg = ASSISTANTS[vertical] || ASSISTANTS.commercial_auto;
   const variables = vertical === 'life_fe' ? lifeVariables(lead) : commercialVariables(lead);
+  const isCallback = opts.type === 'callback';
+  const firstMessage = isCallback ? callbackIntro(lead, vertical) : undefined;
+  if (isCallback) {
+    variables.natural_opener = firstMessage;
+    variables.call_type = 'callback';
+  }
 
   try {
     const response = await vapiClient.post('/call', {
@@ -97,7 +112,8 @@ async function makeCall(lead) {
         name: (lead.name || '').slice(0, 40)
       },
       assistantOverrides: {
-        variableValues: variables
+        variableValues: variables,
+        ...(firstMessage ? { firstMessage } : {})
       }
     });
 
@@ -113,4 +129,4 @@ async function makeCall(lead) {
   }
 }
 
-module.exports = { makeCall, isLifeLead, leadVertical, ASSISTANTS };
+module.exports = { makeCall, isLifeLead, leadVertical, ASSISTANTS, callbackIntro };

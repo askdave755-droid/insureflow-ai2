@@ -98,12 +98,15 @@ async function handleCallOutcome(lead, analysis, actor = 'system') {
         console.warn(`⚠️ Callback SMS failed for ${label}: ${err.message}`);
       }
       const retryAt = getNextBusinessTime(lead.state);
-      updates.status = 'scheduled';
+      // PATCH 1/3: callback_pending takes the lead out of the cold queue; the
+      // re-dial is a flagged callback job (cap bypass, callback intro).
+      updates.status = 'callback_pending';
       updates.scheduledCallAt = retryAt;
       // Stagger 0-120s so a wave of callbacks doesn't mature at the same second
-      await callQueue.add('make-call', { leadId: lead.id }, {
+      await callQueue.add('make-call', { leadId: lead.id, type: 'callback' }, {
         delay: Math.max(retryAt - Date.now(), 60000) + Math.floor(Math.random() * 120000),
-        priority: leadPriority(lead)
+        priority: 1,
+        jobId: `callback-${lead.id}-${retryAt.getTime()}`
       });
       task = await createTask({
         leadId: lead.id,

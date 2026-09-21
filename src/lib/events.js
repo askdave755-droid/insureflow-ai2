@@ -91,13 +91,26 @@ async function quoteIssued(lead, data = {}) {
 
 // ── appointment.booked (VAPI book_time, or Calendly with skipCallback) ──
 async function appointmentBooked(lead, data = {}) {
-  const when = data.time ? new Date(data.time) : plusDays(1);
-  if (isNaN(when.getTime())) throw new Error('Invalid appointment time');
+  // PATCH 3: startsAt must be a real future time (> now + 5 min). Anything
+  // else (missing, unparsable, past, or "now" stamped by the tool call) is
+  // treated as ASAP -> next business window.
+  const { getNextBusinessTime, isBusinessHours } = require('./validate');
+  const MIN_LEAD_MS = 5 * 60 * 1000;
+  const raw = data.startsAt || data.time || null;
+  let when = raw ? new Date(raw) : null;
+  let asap = false;
+  if (!when || isNaN(when.getTime()) || when.getTime() <= Date.now() + MIN_LEAD_MS) {
+    asap = true;
+    when = isBusinessHours(lead.state)
+      ? new Date(Date.now() + MIN_LEAD_MS)
+      : getNextBusinessTime(lead.state);
+    console.log(`📅 appointment.booked: ${lead.name} — startsAt ${raw || 'missing'} not >now+5min, treating as ASAP -> ${when.toISOString()}`);
+  }
 
   const task = await createTask({
     leadId: lead.id,
     type: 'APPOINTMENT',
-    title: `📅 Appointment: ${lead.name} — ${when.toLocaleString('en-US', { timeZone: 'America/Phoenix' })} AZ`,
+    title: `📅 Appointment: ${lead.name} — ${when.toLocaleString('en-US', { timeZone: 'America/Phoenix' })} AZ${asap ? ' (ASAP)' : ''}`,
     notes: data.notes || 'Booked by VAPI book_time',
     dueAt: when,
     priority: 'hot'
@@ -108,16 +121,29 @@ async function appointmentBooked(lead, data = {}) {
     when.toLocaleString('en-US', { timeZone: 'America/Phoenix', weekday: 'long', month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' }) +
     ' (AZ time). I will call you then - this thread works if anything changes. - David');
 
-  // VAPI callback at the appointment time — skipped for Calendly bookings
-  // (Dave runs those meetings himself; a robocall then would be wrong)
+  // VAPI callback — skipped for Calendly bookings (Dave runs those himself).
+  // Valid future time -> dial at startsAt - 1 min, flagged type:'callback'
+  // (bypasses the daily cap, 1 concurrent, uses the callback intro).
   let callbackAt = null;
   if (!data.skipCallback) {
-    const delay = Math.max(when.getTime() - Date.now(), 0);
-    await callQueue.add('make-call', { leadId: lead.id }, { delay, priority: 1 });
-    callbackAt = when.toISOString();
+    const dialAt = asap ? when.getTime() : when.getTime() - 60000;
+    const delay = Math.max(dialAt - Date.now(), 0);
+    // Pull the lead out of the cold queue and drop any duplicate dials
+    try {
+      const { removeQueuedCallsForLead } = require('../workers/callWorker');
+      await removeQueuedCallsForLead(lead.id);
+    } catch (e) { /* worker not loaded in this process */ }
+    await prisma.lead.update({
+      where: { id: lead.id },
+      data: { status: 'callback_pending', scheduledCallAt: new Date(dialAt) }
+    });
+    await callQueue.add('make-call', { leadId: lead.id, type: 'callback' }, {
+      delay, priority: 1, jobId: `callback-${lead.id}-${dialAt}`
+    });
+    callbackAt = new Date(dialAt).toISOString();
   }
-  console.log(`📅 appointment.booked: ${lead.name} @ ${when.toISOString()} (callback: ${callbackAt || 'skipped'})`);
-  return { taskId: task && task.id, callbackAt };
+  console.log(`📅 appointment.booked: ${lead.name} @ ${when.toISOString()} (callback dial: ${callbackAt || 'skipped'}${asap ? ', ASAP' : ''})`);
+  return { taskId: task && task.id, startsAt: when.toISOString(), asap, callbackAt };
 }
 
 // ── policy.bound (manual mark or carrier webhook) ──

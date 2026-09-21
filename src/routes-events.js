@@ -53,7 +53,9 @@ function attachEventRoutes(app, pool) {
   });
 
   // ── appointment.booked ──
-  // POST /api/events/appointment { leadId|phone, time (ISO), notes?, skipCallback? }
+  // POST /api/events/appointment { leadId|phone, startsAt|time (ISO), notes?, skipCallback? }
+  // PATCH 3: startsAt must be > now+5min, else treated as ASAP (next business
+  // window). Valid future time -> callback dial queued at startsAt-1min.
   app.post('/api/events/appointment', requireAdminKey, async (req, res) => {
     try {
       const lead = await findLead(req.body);

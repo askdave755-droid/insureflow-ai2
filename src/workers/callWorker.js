@@ -199,7 +199,7 @@ callQueue.process('make-call', 3, async (job) => {
   });
   
   // Make the call (vapi.makeCall branches commercial vs life assistant)
-  const result = await makeCall(lead);
+  const result = await makeCall(lead, { type: job.data.type });
   
   if (!result.success) {
     const msg = result.error || '';
