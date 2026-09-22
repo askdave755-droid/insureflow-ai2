@@ -12,7 +12,10 @@ const { handleApolloReplyWebhook } = require('./lib/apolloNurture');
 function attachApolloNurtureRoutes(app) {
   app.post('/webhook/apollo/replies', async (req, res) => {
     const providedSecret = req.query.secret || req.headers['x-apollo-secret'];
-    if (config.APOLLO_WEBHOOK_SECRET && providedSecret !== config.APOLLO_WEBHOOK_SECRET) {
+    if (!config.APOLLO_WEBHOOK_SECRET) {
+      return res.status(503).json({ error: 'APOLLO_WEBHOOK_SECRET is not configured' });
+    }
+    if (providedSecret !== config.APOLLO_WEBHOOK_SECRET) {
       return res.status(401).json({ error: 'Invalid webhook secret' });
     }
     try {
