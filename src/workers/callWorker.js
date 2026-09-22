@@ -6,6 +6,7 @@ const { isBusinessHours, getNextBusinessTime } = require('../lib/validate');
 const { analyzeCall } = require('../lib/qualify');
 const { handleLifeCallDone } = require('../lib/lifePipeline');
 const { handleCallOutcome, createTask } = require('../lib/followup');
+const { enrollLeadInNurture } = require('../lib/apolloNurture');
 const { canDial, markDialing, markEnded } = require('../lib/callSemaphore');
 
 // ─── PATCH 2: dial cap enforced AT DIAL TIME (not just at the feeder) ───
@@ -381,6 +382,18 @@ async function handleVapiWebhook(webhookData) {
       return { qualified: false, disposition: 'dnc', leadId: lead.id, vertical: 'life_fe', factFind: ff };
     }
 
+    // Apollo email layer: positive/completed life outcomes with an email join
+    // nurture-life_fe + the configured Apollo sequence. Idempotent; failures
+    // must never break the Vapi webhook.
+    try {
+      await enrollLeadInNurture(
+        { ...lead, email: ff.email || lead.email, qualified },
+        { disposition, qualified }
+      );
+    } catch (err) {
+      console.warn(`⚠️ Apollo nurture enrollment failed for ${lead.name || lead.id}: ${err.message}`);
+    }
+
     if (qualified) {
       await createTask({
         leadId: lead.id,
@@ -422,6 +435,18 @@ async function handleVapiWebhook(webhookData) {
   });
 
   const outcome = await handleCallOutcome(lead, analysis, 'webhook:vapi');
+
+  // Apollo email layer: completed/positive commercial outcomes with an email
+  // join nurture-<vertical> + the configured Apollo sequence. Idempotent;
+  // failures must never break the Vapi webhook.
+  try {
+    await enrollLeadInNurture(
+      { ...lead, ...(outcome.updates || {}), qualified: outcome.qualified },
+      { disposition: outcome.disposition, qualified: outcome.qualified }
+    );
+  } catch (err) {
+    console.warn(`⚠️ Apollo nurture enrollment failed for ${lead.name || lead.id}: ${err.message}`);
+  }
 
   // PATCH 1: callback outcomes make the lead ineligible for the cold queue
   if (CALLBACK_DISPOSITIONS.has(outcome.disposition)) {
