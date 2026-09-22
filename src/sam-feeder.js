@@ -14,6 +14,7 @@
 const prisma = require("./db");
 const { callQueue } = require("./queue");
 const { formatPhoneE164 } = require("./lib/validate");
+const { isSchemaDriftError, driftSummary } = require("./lib/schemaDrift");
 
 const SAM_API = "https://api.sam.gov/entity-information/v3/entities";
 const BUDGET = parseInt(process.env.SAM_DAILY_BUDGET || "8", 10);
@@ -107,6 +108,7 @@ async function run() {
           console.log(`🏛️ SAM ${state} ${naics} p${page}: ${ents.length} active entities`);
           for (const ent of ents) {
             if (await getSamCountToday() >= BUDGET) break outer;
+            try {
             const q = qualify(ent);
             if (!q.uei || !q.name) continue;
             const exists = await prisma.lead.findFirst({ where: { uei: q.uei } });
@@ -146,6 +148,15 @@ async function run() {
             await callQueue.add("make-call", { leadId: lead.id },
               { delay: 15_000, attempts: 3, backoff: { type: "exponential", delay: 60_000 },
                 priority: lane === "PRIORITY" ? 1 : 5, jobId: "sam-" + lead.id });
+            } catch (e) {
+              if (isSchemaDriftError(e)) {
+                // Schema drift (e.g. leads.uei dropped): log ONCE, abort the
+                // whole run — every create would fail the same way.
+                console.error(`🚨 SAM feeder ABORTED: DB schema drift (${driftSummary(e)}). Fix the schema before next run — refusing to flood logs.`);
+                return;
+              }
+              console.warn(`⚠️ SAM entity failed (${(ent.entityRegistration || {}).legalBusinessName || 'unknown'}): ${e.message}`);
+            }
           }
           page++;
         }

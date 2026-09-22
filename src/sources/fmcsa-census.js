@@ -38,6 +38,7 @@ const cron = require('node-cron');
 const axios = require('axios');
 const prisma = require('../db');
 const { callQueue } = require('../queue');
+const { isSchemaDriftError, driftSummary } = require('../lib/schemaDrift');
 
 const SOCRATA_BASE = 'https://data.transportation.gov/resource/az4n-8mr2.json';
 const APP_TOKEN = process.env.SOCRATA_APP_TOKEN;
@@ -220,6 +221,12 @@ async function ingestCensus() {
       freshIds.push(lead.id);
       imported++;
     } catch (e) {
+      if (isSchemaDriftError(e)) {
+        // Schema drift (e.g. leads.uei dropped by a stale db push): log ONCE
+        // and abort — never hammer thousands of rows into a broken schema.
+        console.error(`🚨 FMCSA census ABORTED: DB schema drift (${driftSummary(e)}). ${imported} imported, ${candidates.length - imported - errors} candidates NOT attempted. Fix the schema (db-boot self-heal on next deploy) — refusing to flood logs.`);
+        return { aborted: 'schema_drift', imported, errors, rawTotal, candidates: candidates.length };
+      }
       errors++;
       console.warn(`🚛 FMCSA row failed (DOT ${c.dot}): ${e.message}`);
     }

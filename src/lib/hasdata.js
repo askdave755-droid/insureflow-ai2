@@ -29,6 +29,7 @@
 const axios = require('axios');
 const { detectOccupation } = require('./occupations');
 const config = require('../config');
+const { isSchemaDriftError, driftSummary } = require('./schemaDrift');
 
 const HASDATA_API_KEY = process.env.HASDATA_API_KEY;
 // Correct API path per docs.hasdata.com: /scrape/google-maps/search
@@ -168,6 +169,12 @@ async function importHasDataRows(rows, pool, query = null) {
       );
       imported++;
     } catch (e) {
+      if (isSchemaDriftError(e)) {
+        // Schema drift: log ONCE and abort the batch instead of hammering
+        // every remaining row into a broken schema.
+        console.error(`🚨 HasData import ABORTED: DB schema drift (${driftSummary(e)}). ${imported} imported before abort; refusing to flood logs.`);
+        return { imported, skipped, errors, why, aborted: 'schema_drift' };
+      }
       errors++;
       console.warn(`HasData row insert failed (${row.title || row.name || 'unknown'}): ${e.message}`);
     }
