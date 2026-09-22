@@ -9,6 +9,7 @@ const { attachCarrierRoutes } = require('./routes-carrier');
 const { attachLifeRoutes } = require('./routes-life');
 const { attachEventRoutes } = require('./routes-events');
 const { attachAnnuityRoutes } = require('./routes-annuity');
+const { attachApolloNurtureRoutes } = require('./routes-apollo-nurture');
 
 require('./orchestrator');
 require('./life-feeder');   // automated HasData life/FE lead generation
@@ -70,6 +71,7 @@ attachCarrierRoutes(app, pool);
 attachLifeRoutes(app, pool);
 attachEventRoutes(app, pool);
 attachAnnuityRoutes(app, pool);
+attachApolloNurtureRoutes(app);
 
 // Error handler
 app.use((err, req, res, next) => {
