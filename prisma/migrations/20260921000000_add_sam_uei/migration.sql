@@ -1,5 +1,6 @@
 -- AlterTable: SAM.gov Unique Entity ID (dedupe key for sam-feeder)
-ALTER TABLE "leads" ADD COLUMN "uei" TEXT;
+-- IF NOT EXISTS: this DB has drift history (db push), so make re-application safe.
+ALTER TABLE "leads" ADD COLUMN IF NOT EXISTS "uei" TEXT;
 
 -- CreateIndex
-CREATE UNIQUE INDEX "leads_uei_key" ON "leads"("uei");
+CREATE UNIQUE INDEX IF NOT EXISTS "leads_uei_key" ON "leads"("uei");
