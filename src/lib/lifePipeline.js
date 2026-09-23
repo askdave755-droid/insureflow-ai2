@@ -7,7 +7,7 @@ const { brevoEmail, brevoSMS } = require('./brevo');
 
 const IMN_URL = process.env.IMN_URL || 'https://insuremenowdirect.com/agent/dawudrafael/';
 
-const VAPI_LIFE_PROMPT = `You are Brady with David Hughes Insurance. You specialize in life insurance for {{occupation_plural}}. You are NOT a telemarketer - you are a specialist who quotes {{occupation_plural}} in {{state}}. Your ONLY goal on this call is to get information to send quotes. You are NOT selling anything on this call.
+const VAPI_LIFE_PROMPT = `You are Frank with David Hughes Insurance. You specialize in life insurance for {{occupation_plural}}. You are NOT a telemarketer - you are a specialist who quotes {{occupation_plural}} in {{state}}. Your ONLY goal on this call is to get information to send quotes. You are NOT selling anything on this call.
 
 ABSOLUTE RULES:
 - Every sentence out of your mouth is a QUESTION. Never make a statement.
@@ -22,17 +22,17 @@ ABSOLUTE RULES:
 
 OPENER:
 "Hi, is this {{lead_name}}?"
-[Yes] "This is Brady. Got a minute?"
+[Yes] "This is Frank. Got a minute?"
 [Yes / it depends] "You still a {{occupation}}?"
 [Yes] "Good - we specialize in life insurance for {{occupation_plural}}. Who do you have your life insurance with?"
 
 If asked how you got their number: "You're a {{occupation}}, right? {{occupation_plural}} are all we work with. That's how."
 
 INBOUND CALLBACKS - if they called YOU (they got your voicemail or text and called back):
-They are already warm. Skip the opener. Say: "Thanks for calling back - this is Brady, I called earlier about life insurance for {{occupation_plural}}. Got two minutes for a few quick questions so I can send your quotes?" Then go straight into the fact-find.
+They are already warm. Skip the opener. Say: "Thanks for calling back - this is Frank, I called earlier about life insurance for {{occupation_plural}}. Got two minutes for a few quick questions so I can send your quotes?" Then go straight into the fact-find.
 
 IDENTITY QUESTIONS - "who is this," "how did you get my number," "what is this about" are NOT objections. Answer them directly and keep going:
-- Who: "This is Brady with David Hughes Insurance - I specialize in life insurance for {{occupation_plural}}."
+- Who: "This is Frank with David Hughes Insurance - I specialize in life insurance for {{occupation_plural}}."
 - How: "You're a {{occupation}}, right? {{occupation_plural}} are all we work with. That's how."
 Then IMMEDIATELY the next fact-find question. These never count as objections.
 
@@ -176,11 +176,11 @@ function quotesEmailHtml(lead, ff) {
   '<div style="background:#0f172a;color:#f59e0b;padding:20px 30px">' +
   '<h2 style="margin:0">Your life insurance quotes are ready, ' + first + '</h2></div>' +
   '<div style="padding:30px;color:#1e293b;font-size:15px;line-height:1.6">' +
-  '<p>' + first + ', Brady here - we spoke briefly about your coverage ' +
+  '<p>' + first + ', Frank here - we spoke briefly about your coverage ' +
   (ff.coverage_amount ? '($' + ff.coverage_amount.toLocaleString() + ')' : '') +
   (ff.monthly_premium ? ' at about $' + ff.monthly_premium + '/month' : '') +
   '. Your quotes are ready - instant decision, no agent visit, print your policy tonight.</p>' +
-  '<p style="text-align:center;margin:30px 0"><a href="' + IMN_URL + '?src=brady&ref=' + lead.id +
+  '<p style="text-align:center;margin:30px 0"><a href="' + IMN_URL + '?src=frank&ref=' + lead.id +
   '" style="background:#f59e0b;color:#0f172a;padding:14px 36px;text-decoration:none;' +
   'font-weight:bold;font-size:16px;border-radius:6px;display:inline-block">SEE MY QUOTES &rarr;</a></p>' +
   '<p style="font-size:13px;color:#64748b">David Hughes Insurance - ' +
@@ -215,15 +215,15 @@ async function handleLifeCallDone(lead, callData, pool) {
     if (lead.phone) {
       const first = (lead.name || 'there').split(' ')[0];
       await brevoSMS(lead.phone,
-        first + ', Brady here (David Hughes Insurance) - your quotes are in your inbox (' + toEmail +
-        '). Or see rates in 90 seconds here: ' + IMN_URL + '?src=brady-sms&ref=' + lead.id +
+        first + ', Frank here (David Hughes Insurance) - your quotes are in your inbox (' + toEmail +
+        '). Or see rates in 90 seconds here: ' + IMN_URL + '?src=frank-sms&ref=' + lead.id +
         ' Reply STOP to opt out');
     }
     await pool.query('UPDATE leads SET quote_email_sent=TRUE WHERE id=$1', [lead.id]);
   } else if (ff.age && lead.phone) {
     // Age but no email anywhere — chase the email by SMS
     await brevoSMS(lead.phone,
-      'Brady here (David Hughes Insurance) - great talking today. What is the best email for your quotes? Reply STOP to opt out');
+      'Frank here (David Hughes Insurance) - great talking today. What is the best email for your quotes? Reply STOP to opt out');
   }
   return { ...ff, email: toEmail || ff.email };
 }
