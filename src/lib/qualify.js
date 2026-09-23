@@ -221,7 +221,7 @@ const MONTHS = {
 // "renews in March", "expires October 1st", "due in about 6 weeks"
 function renewalHintToDate(text) {
   const monthNames = Object.keys(MONTHS).join('|');
-  let m = text.match(new RegExp(`(?:renew\w*|expir\w*|due|comes? up|lapse\w*)[^.!?]{0,40}?(${monthNames})(?:\s+(\d{1,2})(?:st|nd|rd|th)?)?(?:,?\s*(\d{4}))?`, 'i'));
+  let m = text.match(new RegExp(`(?:renew\u005c\u005cw*|expir\u005c\u005cw*|due|comes? up|lapse\u005c\u005cw*)[^.!?]{0,40}?(${monthNames})(?:\u005c\u005cs+(\u005c\u005cd{1,2})(?:st|nd|rd|th)?)?(?:,?\u005c\u005cs*(\u005c\u005cd{4}))?`, 'i'));
   if (m) {
     const now = new Date();
     const month = MONTHS[m[1].toLowerCase()];
@@ -253,7 +253,7 @@ function extractCallIntel(transcript = '', summary = '') {
   if (m) out.driverCount = parseInt(m[1], 10);
 
   for (const c of KNOWN_CARRIERS) {
-    const re = new RegExp(`\b${c.replace(/ /g, '\s')}(?:\s+insurance)?\b`, 'i');
+    const re = new RegExp(`\u005c\u005cb${c.replace(/ /g, '\u005c\u005cs')}(?:\u005c\u005cs+insurance)?\u005c\u005cb`, 'i');
     if (re.test(text)) { out.currentCarrier = titleCase(c); break; }
   }
 
