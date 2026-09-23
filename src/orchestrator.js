@@ -20,12 +20,12 @@ const config = require('./config');
 //     restaurants, childcare, home health, auto repair, etc.).
 //
 // 2026-09-15 PATCH 3 — email-only lane LIVE:
-//   Apollo leads with phones queue for Brady calls as before. Email-only leads
+//   Apollo leads with phones queue for Frank calls as before. Email-only leads
 //   are enrolled in sequences/commercial_drip_v1.json via a lazy require inside
 //   the loop (sequence engine stays off the boot path; failures are caught and
 //   logged, never crash ingestion). Engagement (opens/clicks) is handled by
 //   /webhook/brevo -> lib/engagement.js: Dave gets alerted and an Apollo phone
-//   reveal is attempted; once a number lands, Brady calls the warm lead.
+//   reveal is attempted; once a number lands, Frank calls the warm lead.
 const SOURCES = [
   // ── Michigan (resident) ──
   { state: 'MI', city: 'Detroit',        keywords: 'trucking logistics freight transportation manufacturing', titles: ['Owner', 'President', 'CEO', 'Fleet Manager', 'Operations Manager'] },

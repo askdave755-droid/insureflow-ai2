@@ -7,7 +7,7 @@ function analyzeXDate(xDate) {
     return {
       daysToRenewal: null,
       tier: 'UNKNOWN',
-      pitchAngle: 'discover',       // Brady's call must surface the X-date
+      pitchAngle: 'discover',       // Frank's call must surface the X-date
       scriptHint: 'First job on this call: find out when the policy renews.'
     };
   }

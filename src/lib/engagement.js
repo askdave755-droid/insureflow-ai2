@@ -13,7 +13,7 @@
  *
  *   /webhook/apollo/phones -> handleApolloPhoneWebhook(body)
  *     - saves the revealed number to the lead, DNC re-check, then queues
- *       Brady (make-call). This is a WARM call — the lead engaged first.
+ *       Frank (make-call). This is a WARM call — the lead engaged first.
  *
  * Env:
  *   OWNER_EMAIL          where hot-lead alerts go (default nexusgpartners@gmail.com; legacy DAVE_ALERT_EMAIL still honored)

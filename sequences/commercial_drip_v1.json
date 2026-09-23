@@ -5,7 +5,7 @@
     "any human reply -> stop automation, alert Dave, human takes over",
     "Brevo unsubscribe/spam event -> DNC hard stop via /webhook/brevo",
     "hard bounce -> lead marked bounced, sequence stops",
-    "engagement escalation (click / 3+ opens) -> Dave alerted, phone reveal attempted, Brady calls once a number lands"
+    "engagement escalation (click / 3+ opens) -> Dave alerted, phone reveal attempted, Frank calls once a number lands"
   ],
   "identity": "From: David Hughes Insurance <david@nexusgpartners.net>. Sign all: - David Hughes, David Hughes Insurance",
   "compliance_note": "B2B cold email under CAN-SPAM: real identity, real subject lines, working opt-out in every touch. No AI-voice cold call on these leads until they engage AND a phone number is revealed — then it's a warm follow-up, compliance-gated like any call.",

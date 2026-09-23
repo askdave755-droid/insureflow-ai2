@@ -82,7 +82,7 @@ function insuranceOpportunityScore(lead, xdate) {
   else if (units === 1) { score += 8; breakdown.premium = [8, 'single unit — small premium']; }
   else { score += 10; breakdown.premium = [10, 'fleet unknown']; }
 
-  // Incumbent carrier known (15 pts) — gives Brady a target to beat
+  // Incumbent carrier known (15 pts) — gives Frank a target to beat
   if (lead.currentCarrier) { score += 15; breakdown.carrier = [15, `current carrier: ${lead.currentCarrier}`]; }
   else { breakdown.carrier = [0, 'current carrier unknown']; }
 
