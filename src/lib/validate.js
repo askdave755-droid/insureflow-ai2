@@ -83,11 +83,11 @@ function getNaturalOpener(lead) {
   const company = lead.company || 'your business';
 
   const openers = [
-    `Hey ${name}, it's Brady. I saw ${company}'s policy coming up for renewal...`,
-    `${name}, Brady here. Real quick—who handles the insurance shopping over there at ${company}?`,
-    `Hi ${name}, Brady with David Hughes Insurance. I'm calling because ${company}'s commercial policy is expiring soon, and I found something that might save you money...`,
-    `${name}, it's Brady. I'm working with a few ${lead.industry || 'business'} owners in ${lead.state || 'the area'} on their renewals. Are you handling that for ${company}?`,
-    `Hey ${name}, Brady. Quick question—you got 30 seconds? I'm looking at ${company}'s policy expiring ${calculateUrgency(lead.xDate)}...`
+    `Hey ${name}, it's Frank. I saw ${company}'s policy coming up for renewal...`,
+    `${name}, Frank here. Real quick—who handles the insurance shopping over there at ${company}?`,
+    `Hi ${name}, Frank with David Hughes Insurance. I'm calling because ${company}'s commercial policy is expiring soon, and I found something that might save you money...`,
+    `${name}, it's Frank. I'm working with a few ${lead.industry || 'business'} owners in ${lead.state || 'the area'} on their renewals. Are you handling that for ${company}?`,
+    `Hey ${name}, Frank. Quick question—you got 30 seconds? I'm looking at ${company}'s policy expiring ${calculateUrgency(lead.xDate)}...`
   ];
 
   return openers[Math.floor(Math.random() * openers.length)];
