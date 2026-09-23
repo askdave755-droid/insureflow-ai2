@@ -9,7 +9,7 @@ const axios = require('axios');
 
 const API_KEY = process.env.BREVO_API_KEY;
 const SENDER = process.env.BREVO_SENDER || 'noreply@example.com';
-const SMS_SENDER = process.env.BREVO_SMS_SENDER || 'Brady';
+const SMS_SENDER = process.env.BREVO_SMS_SENDER || 'Frank';
 
 function formatPhone(phone) {
   const d = String(phone).replace(/\D/g, '');
