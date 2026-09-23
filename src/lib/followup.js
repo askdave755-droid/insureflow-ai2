@@ -2,7 +2,7 @@
 // FOLLOW-UP ENGINE (Phase 3)
 // Routes every completed call to its next action:
 // booked/interested → Brevo follow-up + conversion + Dave task
-// callback          → Calendly SMS (keep Brady's promise) + requeue + task
+// callback          → Calendly SMS (keep Frank's promise) + requeue + task
 // no_answer         → retry up to 3 attempts, then nurture + task
 // dnc               → internal DNC + compliance hold (never contacted again)
 // not_interested    → closed
@@ -86,13 +86,13 @@ async function handleCallOutcome(lead, analysis, actor = 'system') {
     }
 
     case 'callback': {
-      // Brady promised a text with the calendar link — keep the promise.
+      // Frank promised a text with the calendar link — keep the promise.
       try {
         const { brevoSMS } = require('./brevo');
         const config = require('../config');
         const first = (lead.name || 'there').split(' ')[0];
         await brevoSMS(lead.phone,
-          first + ', Brady here (David Hughes Insurance) - good talking. Grab your 4-minute comparison slot here: ' +
+          first + ', Frank here (David Hughes Insurance) - good talking. Grab your 4-minute comparison slot here: ' +
           config.CALENDLY_LINK + ' Reply STOP to opt out');
       } catch (err) {
         console.warn(`⚠️ Callback SMS failed for ${label}: ${err.message}`);
@@ -117,7 +117,7 @@ async function handleCallOutcome(lead, analysis, actor = 'system') {
       });
       await ownerAlert(
         `CALLBACK: ${lead.name} (${lead.company || 'unknown co'})`,
-        `${lead.name} asked for a callback on commercial auto.\nPhone: ${lead.phone}\nWhen: ${retryAt.toISOString()}\nNotes: asked Brady to call back during the AI call`
+        `${lead.name} asked for a callback on commercial auto.\nPhone: ${lead.phone}\nWhen: ${retryAt.toISOString()}\nNotes: asked Frank to call back during the AI call`
       );
       break;
     }
