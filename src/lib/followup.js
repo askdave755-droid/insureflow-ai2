@@ -6,6 +6,7 @@
 // no_answer         → retry up to 3 attempts, then nurture + task
 // dnc               → internal DNC + compliance hold (never contacted again)
 // not_interested    → closed
+// completed         → low-priority review task (real conversation, no clear ask)
 // ═══════════════════════════════════════════════
 
 const prisma = require('../db');
@@ -150,6 +151,21 @@ async function handleCallOutcome(lead, analysis, actor = 'system') {
 
     case 'not_interested': {
       updates.status = 'closed';
+      break;
+    }
+
+    case 'completed': {
+      // Real conversation, but no explicit booking/callback/interest phrase.
+      // Keep the lead visible instead of letting it die as "called".
+      updates.status = 'called';
+      task = await createTask({
+        leadId: lead.id,
+        type: 'FOLLOW_UP',
+        title: `Review completed call: ${lead.company || lead.name} — no clear next step captured`,
+        notes: `Phone: ${lead.phone}${lead.email ? ` | Email: ${lead.email}` : ''} | Disposition: completed | Review the transcript and choose callback / nurture / close.`,
+        priority: 'low'
+      });
+      console.log(`🧾 ${label} completed without a clear ask — review task created`);
       break;
     }
 
