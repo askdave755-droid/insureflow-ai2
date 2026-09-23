@@ -82,13 +82,27 @@ function lifeVariables(lead) {
 }
 
 // PATCH 3: callback intro — used when the make-call job carries {type:'callback'}
-const ASSISTANT_NAME = process.env.VAPI_ASSISTANT_NAME || 'Brady';
+const ASSISTANT_NAME = process.env.VAPI_ASSISTANT_NAME || 'Frank';
 function callbackIntro(lead, vertical) {
   const first = (lead.name || 'there').split(' ')[0];
   const product = vertical === 'life_fe' ? 'life insurance'
     : (lead.insuranceType || 'commercial auto').replace(/_/g, ' ');
   return `Hi ${first}, this is ${ASSISTANT_NAME} from Nexus — you asked us to call you back about ${product}.`;
 }
+
+// Answering-machine detection + voicemail drop. Without AMD the assistant
+// talks over the beep and the call scores as a real conversation. Voicemail
+// copy is per-vertical; the drop happens on machine detection.
+const VOICEMAIL = {
+  commercial_auto:
+    `Hi, this is ${ASSISTANT_NAME} with David Hughes Insurance — sorry we missed you. ` +
+    `We were calling about your commercial auto policy. We'll try you back, ` +
+    `or get a 60-second ballpark anytime at NexusGrowthPartners dot net. Thanks!`,
+  life_fe:
+    `Hi, this is ${ASSISTANT_NAME} with David Hughes Insurance — sorry we missed you. ` +
+    `We were calling about your life insurance options. We'll try you back, ` +
+    `or get a 60-second ballpark anytime at NexusGrowthPartners dot net. Thanks!`
+};
 
 async function makeCall(lead, opts = {}) {
   const vertical = leadVertical(lead);
@@ -113,7 +127,9 @@ async function makeCall(lead, opts = {}) {
       },
       assistantOverrides: {
         variableValues: variables,
-        ...(firstMessage ? { firstMessage } : {})
+        ...(firstMessage ? { firstMessage } : {}),
+        voicemailDetection: { provider: 'twilio' },
+        voicemailMessage: VOICEMAIL[vertical] || VOICEMAIL.commercial_auto
       }
     });
 
