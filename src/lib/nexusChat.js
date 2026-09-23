@@ -4,7 +4,7 @@
 // nexusgpartners.net — leads arrive already lane='WEB', source='nexus_chat'.
 //
 // Routing:
-//   commercial   -> commercial_auto pipeline (pending; Brady call queue if
+//   commercial   -> commercial_auto pipeline (pending; Frank call queue if
 //                   business hours, else scheduled next open)
 //   everything else (term_life, disability, unknown) -> life_fe pending,
 //                   queued the same way — these are inbound WARM leads,
@@ -97,7 +97,7 @@ async function handleNexusChatLead(body) {
       `<p>Someone just completed the Nexus chat quote widget:</p>
        <p><b>${lead.name}</b><br>${phone}<br>${lead.email || 'no email'}</p>
        <p>${notes}</p>
-       <p>Brady's call is ${queued ? 'queued' : 'scheduled'} — warm inbound, handle fast.</p>`
+       <p>Frank's call is ${queued ? 'queued' : 'scheduled'} — warm inbound, handle fast.</p>`
     ).catch(err => console.error('⚠️ Nexus chat alert email failed:', err.message));
   }
 
