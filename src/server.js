@@ -73,6 +73,7 @@ attachEventRoutes(app, pool);
 attachAnnuityRoutes(app, pool);
 attachApolloNurtureRoutes(app);
 app.use('/admin', require('./routes-apollo-mailbox-ids'));
+app.use('/admin', require('./routes-apollo-bulk-match'));
 
 // Error handler
 app.use((err, req, res, next) => {
